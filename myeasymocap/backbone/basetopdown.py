@@ -125,6 +125,125 @@ def xyxy2ccwh(bbox):
     cy = (bbox[:, 3] + bbox[:, 1])/2
     return np.stack([cx, cy, w, h], axis=1)
 
+# class BaseTopDownModel(nn.Module):
+#     def __init__(self, bbox_scale, res_input,
+#                 mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
+#         super().__init__()
+#         self.bbox_scale = bbox_scale
+#         if not isinstance(res_input, list):
+#             res_input = [res_input, res_input]
+#         self.crop_size = res_input
+#         self.mean = mean
+#         self.std = std
+
+#     def load_checkpoint(self, model, state_dict, prefix, strict):
+#         state_dict_new = {}
+#         for key, val in state_dict.items():
+#             if key.startswith(prefix):
+#                 key_new = key.replace(prefix, '')
+#                 state_dict_new[key_new] = val
+#         model.load_state_dict(state_dict_new, strict=strict)
+
+#     def infer(self, image, bbox, to_numpy=False, flips=None):
+#         if isinstance(image, str):
+#             image = cv2.imread(image)
+#         img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+#         squeeze = False
+#         if len(bbox.shape) == 1:
+#             bbox = bbox[None]
+#             squeeze = True
+#         # TODO: 兼容多张图片的
+#         bbox = xyxy2ccwh(bbox)
+#         # convert the bbox to the aspect of input bbox
+#         aspect_ratio = self.crop_size[1] / self.crop_size[0]
+#         w, h = bbox[:, 2], bbox[:, 3]
+#         # 如果height大于w*ratio，那么增大w
+#         flag = h > aspect_ratio * w
+#         bbox[flag, 2] = h[flag] / aspect_ratio
+#         # 否则增大h
+#         bbox[~flag, 3] = w[~flag] * aspect_ratio
+#         inputs = []
+#         inv_trans_ = []
+#         for i in range(bbox.shape[0]):
+#             if flips is None:
+#                 fliplr=False
+#             else:
+#                 fliplr=flips[i]
+#             norm_img, inv_trans = get_single_image_crop_demo(
+#                 img,
+#                 bbox[i],
+#                 scale=self.bbox_scale,
+#                 crop_size=self.crop_size,
+#                 mean=self.mean,
+#                 std=self.std,
+#                 fliplr=fliplr
+#             )
+#             inputs.append(norm_img)
+#             inv_trans_.append(inv_trans)
+#         if False:
+#             vis = np.hstack(inputs)
+#             mean, std = np.array(self.mean), np.array(self.std)
+#             mean = mean.reshape(3, 1, 1)
+#             std = std.reshape(3, 1, 1)
+#             vis = (vis * std) + mean
+#             vis = vis.transpose(1, 2, 0)
+#             vis = (vis[:, :, ::-1] * 255).astype(np.uint8)
+#             cv2.imwrite('debug_crop.jpg', vis)
+#         inputs = np.stack(inputs)
+#         inv_trans_ = np.stack(inv_trans_)
+#         inputs = torch.FloatTensor(inputs).to(self.device)
+#         with torch.no_grad():
+#             output = self.model(inputs)
+#         if squeeze:
+#             for key, val in output.items():
+#                 output[key] = val[0]
+#         if to_numpy:
+#             for key, val in output.items():
+#                 if torch.is_tensor(val):
+#                     output[key] = val.detach().cpu().numpy()
+#         output['inv_trans'] = inv_trans_
+#         return output
+
+#     @staticmethod
+#     def batch_affine_transform(points, trans):
+#         # points: (Bn, J, 2), trans: (Bn, 2, 3)
+#         points = np.dstack((points[..., :2], np.ones((*points.shape[:-1], 1))))
+#         out = np.matmul(points, trans.swapaxes(-1, -2))
+#         return out
+
+# class BaseTopDownModelCache(BaseTopDownModel):
+#     def __init__(self, name, **kwargs):
+#         super().__init__(**kwargs)
+#         self.name = name
+    
+#     def cachename(self, imgname):
+#         basename = os.sep.join(imgname.split(os.sep)[-2:])
+#         cachename = join(self.output, self.name, basename.replace('.jpg', '.pkl'))
+#         return cachename
+
+#     def dump(self, cachename, output):
+#         os.makedirs(os.path.dirname(cachename), exist_ok=True)
+#         with open(cachename, 'wb') as f:
+#             pickle.dump(output, f)
+#         return output
+    
+#     def load(self, cachename):
+#         with open(cachename, 'rb') as f:
+#             output = pickle.load(f)
+#         return output
+
+#     def __call__(self, bbox, images, imgname, flips=None):
+#         cachename = self.cachename(imgname)
+#         if os.path.exists(cachename):
+#             output = self.load(cachename)
+#         else:
+#             output = self.infer(images, bbox, to_numpy=True, flips=flips)
+#             output = self.dump(cachename, output)
+
+#         ret = {
+#             'params': output
+#         }
+#         return ret
 class BaseTopDownModel(nn.Module):
     def __init__(self, bbox_scale, res_input,
                 mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
@@ -145,6 +264,11 @@ class BaseTopDownModel(nn.Module):
         model.load_state_dict(state_dict_new, strict=strict)
 
     def infer(self, image, bbox, to_numpy=False, flips=None):
+        """
+        原始的 infer 方法，保持向後兼容
+        image: 單張圖片路徑或 numpy array
+        bbox: (N, 5) 的 bbox 數組
+        """
         if isinstance(image, str):
             image = cv2.imread(image)
         img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -152,23 +276,21 @@ class BaseTopDownModel(nn.Module):
         if len(bbox.shape) == 1:
             bbox = bbox[None]
             squeeze = True
-        # TODO: 兼容多张图片的
+        
         bbox = xyxy2ccwh(bbox)
-        # convert the bbox to the aspect of input bbox
         aspect_ratio = self.crop_size[1] / self.crop_size[0]
         w, h = bbox[:, 2], bbox[:, 3]
-        # 如果height大于w*ratio，那么增大w
         flag = h > aspect_ratio * w
         bbox[flag, 2] = h[flag] / aspect_ratio
-        # 否则增大h
         bbox[~flag, 3] = w[~flag] * aspect_ratio
+        
         inputs = []
         inv_trans_ = []
         for i in range(bbox.shape[0]):
             if flips is None:
-                fliplr=False
+                fliplr = False
             else:
-                fliplr=flips[i]
+                fliplr = flips[i]
             norm_img, inv_trans = get_single_image_crop_demo(
                 img,
                 bbox[i],
@@ -180,20 +302,13 @@ class BaseTopDownModel(nn.Module):
             )
             inputs.append(norm_img)
             inv_trans_.append(inv_trans)
-        if False:
-            vis = np.hstack(inputs)
-            mean, std = np.array(self.mean), np.array(self.std)
-            mean = mean.reshape(3, 1, 1)
-            std = std.reshape(3, 1, 1)
-            vis = (vis * std) + mean
-            vis = vis.transpose(1, 2, 0)
-            vis = (vis[:, :, ::-1] * 255).astype(np.uint8)
-            cv2.imwrite('debug_crop.jpg', vis)
+        
         inputs = np.stack(inputs)
         inv_trans_ = np.stack(inv_trans_)
         inputs = torch.FloatTensor(inputs).to(self.device)
         with torch.no_grad():
             output = self.model(inputs)
+        
         if squeeze:
             for key, val in output.items():
                 output[key] = val[0]
@@ -204,12 +319,229 @@ class BaseTopDownModel(nn.Module):
         output['inv_trans'] = inv_trans_
         return output
 
+    # def infer_batch(self, images, bboxes, to_numpy=False, flips=None):
+    #     """
+    #     新的跨 view batch 推理方法
+    #     images: 圖片列表 [img1, img2, ...] 或單張圖片
+    #     bboxes: bbox 列表 [bbox1, bbox2, ...] 或單個 bbox array
+    #     flips: 翻轉列表（可選）
+        
+    #     返回:
+    #     output: 包含所有結果的字典
+    #     split_info: 用於重新分割結果的資訊 [(start_idx, end_idx), ...]
+    #     """
+    #     # 統一處理輸入格式
+    #     if not isinstance(images, list):
+    #         images = [images]
+    #         bboxes = [bboxes]
+    #         is_single = True
+    #     else:
+    #         is_single = False
+        
+    #     # 讀取並轉換所有圖片
+    #     imgs_rgb = []
+    #     for img in images:
+    #         if isinstance(img, str):
+    #             img = cv2.imread(img)
+    #         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    #         imgs_rgb.append(img_rgb)
+        
+    #     # 收集所有需要處理的項目
+    #     all_inputs = []
+    #     all_inv_trans = []
+    #     split_info = []  # 記錄每個輸入圖片對應的索引範圍
+        
+    #     total_count = 0
+    #     for img_idx, (img, bbox) in enumerate(zip(imgs_rgb, bboxes)):
+    #         if len(bbox.shape) == 1:
+    #             bbox = bbox[None]
+            
+    #         bbox = xyxy2ccwh(bbox)
+    #         aspect_ratio = self.crop_size[1] / self.crop_size[0]
+    #         w, h = bbox[:, 2], bbox[:, 3]
+    #         flag = h > aspect_ratio * w
+    #         bbox[flag, 2] = h[flag] / aspect_ratio
+    #         bbox[~flag, 3] = w[~flag] * aspect_ratio
+            
+    #         start_idx = total_count
+    #         for i in range(bbox.shape[0]):
+    #             if flips is None:
+    #                 fliplr = False
+    #             else:
+    #                 fliplr = flips[total_count] if isinstance(flips, list) else False
+                
+    #             norm_img, inv_trans = get_single_image_crop_demo(
+    #                 img,
+    #                 bbox[i],
+    #                 scale=self.bbox_scale,
+    #                 crop_size=self.crop_size,
+    #                 mean=self.mean,
+    #                 std=self.std,
+    #                 fliplr=fliplr
+    #             )
+    #             all_inputs.append(norm_img)
+    #             all_inv_trans.append(inv_trans)
+    #             total_count += 1
+            
+    #         end_idx = total_count
+    #         split_info.append((start_idx, end_idx))
+        
+    #     # 如果沒有任何 bbox，返回空結果
+    #     if len(all_inputs) == 0:
+    #         empty_output = {
+    #             'output': np.zeros((0, *self.model.output_shape)) if to_numpy else torch.zeros((0, *self.model.output_shape)),
+    #             'inv_trans': np.zeros((0, 2, 3))
+    #         }
+    #         return empty_output, split_info
+        
+    #     # 批次推理
+    #     all_inputs = np.stack(all_inputs)
+    #     all_inv_trans = np.stack(all_inv_trans)
+    #     inputs_tensor = torch.FloatTensor(all_inputs).to(self.device)
+        
+    #     with torch.no_grad():
+    #         output = self.model(inputs_tensor)
+        
+    #     if to_numpy:
+    #         for key, val in output.items():
+    #             if torch.is_tensor(val):
+    #                 output[key] = val.detach().cpu().numpy()
+        
+    #     output['inv_trans'] = all_inv_trans
+    #     output['split_info'] = split_info
+        
+    #     # 如果是單張圖片單個 bbox，保持原有的 squeeze 行為
+    #     if is_single and bboxes[0].shape[0] == 1:
+    #         for key, val in output.items():
+    #             if key != 'split_info' and isinstance(val, (np.ndarray, torch.Tensor)):
+    #                 output[key] = val[0]
+        
+    #     return output
+    def infer_batch(self, images, bboxes, to_numpy=False, flips=None):
+        # 統一處理輸入格式
+        if not isinstance(images, list):
+            images = [images]
+            bboxes = [bboxes]
+            is_single = True
+        else:
+            is_single = False
+        
+        # Step 1: 預先讀取並轉換所有圖片 (每張圖只讀一次)
+        imgs_rgb = []
+        for img in images:
+            if isinstance(img, str):
+                img = cv2.imread(img)
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            imgs_rgb.append(img_rgb)
+        
+        # Step 2: 統計並展平所有 bbox
+        flat_data = []
+        split_info = []
+        
+        total_count = 0
+        for img_idx, bbox in enumerate(bboxes):
+            if len(bbox.shape) == 1:
+                bbox = bbox[None]
+            
+            start_idx = total_count
+            for i in range(bbox.shape[0]):
+                flat_data.append((img_idx, bbox[i]))
+                total_count += 1
+            
+            end_idx = total_count
+            split_info.append((start_idx, end_idx))
+        
+        # Step 3: 處理無 bbox 的情況
+        if total_count == 0:
+            empty_output = {
+                'output': np.zeros((0, 23, 64, 48)) if to_numpy else torch.zeros((0, 23, 64, 48)),
+                'inv_trans': np.zeros((0, 2, 3)),
+                'split_info': split_info
+            }
+            return empty_output
+        
+        # Step 4: 預先分配記憶體
+        all_inputs = np.zeros((total_count, 3, self.crop_size[1], self.crop_size[0]), dtype=np.float32)
+        all_inv_trans = np.zeros((total_count, 2, 3), dtype=np.float32)
+        
+        # Step 5: 批次處理所有 bbox
+        for idx, (img_idx, bbox_single) in enumerate(flat_data):
+            img = imgs_rgb[img_idx]
+            
+            # 轉換 bbox 格式
+            w = bbox_single[2] - bbox_single[0]
+            h = bbox_single[3] - bbox_single[1]
+            cx = (bbox_single[2] + bbox_single[0]) / 2
+            cy = (bbox_single[3] + bbox_single[1]) / 2
+            bbox_ccwh = np.array([cx, cy, w, h])
+            
+            # 調整長寬比
+            aspect_ratio = self.crop_size[1] / self.crop_size[0]
+            if h > aspect_ratio * w:
+                bbox_ccwh[2] = h / aspect_ratio
+            else:
+                bbox_ccwh[3] = w * aspect_ratio
+            
+            # 處理翻轉
+            if flips is None:
+                fliplr = False
+            else:
+                fliplr = flips[idx] if isinstance(flips, list) else False
+            
+            # 裁切並標準化
+            norm_img, inv_trans = get_single_image_crop_demo(
+                img,
+                bbox_ccwh,
+                scale=self.bbox_scale,
+                crop_size=self.crop_size,
+                mean=self.mean,
+                std=self.std,
+                fliplr=fliplr
+            )
+            
+            all_inputs[idx] = norm_img
+            all_inv_trans[idx] = inv_trans
+        
+        # Step 6: 批次推理 (使用混合精度 - 新版 API)
+        inputs_tensor = torch.FloatTensor(all_inputs).to(self.device)
+        
+        # ========== 使用新版 AMP API ==========
+        if self.use_amp and torch.cuda.is_available():
+            # PyTorch >= 1.10 的新 API
+            with torch.amp.autocast(device_type='cuda'):
+                with torch.no_grad():
+                    output = self.model(inputs_tensor)
+        else:
+            # 標準推理
+            with torch.no_grad():
+                output = self.model(inputs_tensor)
+        # ========================================
+        
+        # Step 7: 轉換輸出格式
+        if to_numpy:
+            for key, val in output.items():
+                if torch.is_tensor(val):
+                    output[key] = val.detach().cpu().numpy()
+        
+        output['inv_trans'] = all_inv_trans
+        output['split_info'] = split_info
+        
+        # Step 8: 保持向後兼容
+        if is_single and total_count == 1:
+            for key, val in output.items():
+                if key not in ['split_info', 'inv_trans'] and isinstance(val, (np.ndarray, torch.Tensor)):
+                    output[key] = val[0]
+            output['inv_trans'] = all_inv_trans[0]
+        
+        return output
+
     @staticmethod
     def batch_affine_transform(points, trans):
         # points: (Bn, J, 2), trans: (Bn, 2, 3)
         points = np.dstack((points[..., :2], np.ones((*points.shape[:-1], 1))))
         out = np.matmul(points, trans.swapaxes(-1, -2))
         return out
+
 
 class BaseTopDownModelCache(BaseTopDownModel):
     def __init__(self, name, **kwargs):
@@ -233,6 +565,7 @@ class BaseTopDownModelCache(BaseTopDownModel):
         return output
 
     def __call__(self, bbox, images, imgname, flips=None):
+        """保持原有接口不變"""
         cachename = self.cachename(imgname)
         if os.path.exists(cachename):
             output = self.load(cachename)

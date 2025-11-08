@@ -218,7 +218,7 @@ class LBFGS(Optimizer):
                  max_eval=None,
                  tolerance_grad=1e-5,
                  tolerance_change=1e-9,
-                 history_size=100,
+                 history_size=10,
                  line_search_fn=None):
         if max_eval is None:
             max_eval = max_iter * 5 // 4
@@ -256,14 +256,23 @@ class LBFGS(Optimizer):
             views.append(view)
         return torch.cat(views, 0)
 
+    # def _add_grad(self, step_size, update):
+    #     offset = 0
+    #     for p in self._params:
+    #         numel = p.numel()
+    #         # view as to avoid deprecated pointwise semantics
+    #         p.data.add_(step_size, update[offset:offset + numel].view_as(p.data))
+    #         offset += numel
+    #     assert offset == self._numel()
     def _add_grad(self, step_size, update):
         offset = 0
         for p in self._params:
             numel = p.numel()
-            # view as to avoid deprecated pointwise semantics
-            p.data.add_(step_size, update[offset:offset + numel].view_as(p.data))
+            # ✅ New syntax (PyTorch >=1.8)
+            p.data.add_(update[offset:offset + numel].view_as(p.data), alpha=step_size)
             offset += numel
         assert offset == self._numel()
+
 
     def _clone_param(self):
         return [p.clone() for p in self._params]
@@ -286,6 +295,9 @@ class LBFGS(Optimizer):
             closure (callable): A closure that reevaluates the model
                 and returns the loss.
         """
+
+
+        torch.cuda.nvtx.range_push("LBFGS_step")
         assert len(self.param_groups) == 1
 
         group = self.param_groups[0]
@@ -304,7 +316,9 @@ class LBFGS(Optimizer):
         state.setdefault('n_iter', 0)
 
         # evaluate initial f(x) and df/dx
+        # torch.cuda.nvtx.range_push("LBFGS_initial_closure")
         orig_loss = closure()
+        # torch.cuda.nvtx.range_pop()
         loss = float(orig_loss)
         current_evals = 1
         state['func_evals'] += 1
@@ -327,7 +341,9 @@ class LBFGS(Optimizer):
         prev_loss = state.get('prev_loss')
 
         n_iter = 0
+        torch.cuda.nvtx.range_pop()
         # optimize for a max of max_iter iterations
+        torch.cuda.nvtx.range_push(f"LBFGS_optimization_loop")
         while n_iter < max_iter:
             # keep track of nb of iterations
             n_iter += 1
@@ -336,6 +352,7 @@ class LBFGS(Optimizer):
             ############################################################
             # compute gradient descent direction
             ############################################################
+            # torch.cuda.nvtx.range_push(f"LBFGS_compute_direction_iter{n_iter}")
             if state['n_iter'] == 1:
                 d = flat_grad.neg()
                 old_dirs = []
@@ -372,27 +389,34 @@ class LBFGS(Optimizer):
                 al = state['al']
 
                 # iteration in L-BFGS loop collapsed to use just one buffer
+                # torch.cuda.nvtx.range_push(f"LBFGS_two_loop_iter{n_iter}")
                 q = flat_grad.neg()
                 for i in range(num_old - 1, -1, -1):
                     al[i] = old_stps[i].dot(q) * ro[i]
-                    q.add_(-al[i], old_dirs[i])
+                    # q.add_(-al[i], old_dirs[i])
+                    q.add_(old_dirs[i], alpha=-al[i])
+
 
                 # multiply by initial Hessian
                 # r/d is the final direction
                 d = r = torch.mul(q, H_diag)
                 for i in range(num_old):
                     be_i = old_dirs[i].dot(r) * ro[i]
-                    r.add_(al[i] - be_i, old_stps[i])
+                    # r.add_(al[i] - be_i, old_stps[i])
+                    r.add_(old_stps[i], alpha=(al[i] - be_i))
+                # torch.cuda.nvtx.range_pop()
+
 
             if prev_flat_grad is None:
                 prev_flat_grad = flat_grad.clone()
             else:
                 prev_flat_grad.copy_(flat_grad)
             prev_loss = loss
-
+            # torch.cuda.nvtx.range_pop()
             ############################################################
             # compute step length
             ############################################################
+            # torch.cuda.nvtx.range_push(f"LBFGS_line_search_iter{n_iter}")
             # reset initial guess for step size
             if state['n_iter'] == 1:
                 t = min(1., 1. / flat_grad.abs().sum()) * lr
@@ -416,20 +440,26 @@ class LBFGS(Optimizer):
                     x_init = self._clone_param()
 
                     def obj_func(x, t, d):
-                        return self._directional_evaluate(closure, x, t, d)
+                        return self._directional_evaluate(closure, x, t, d)   # 利用 closure 計算 loss 和梯度
 
                     loss, flat_grad, t, ls_func_evals = _strong_wolfe(
                         obj_func, x_init, t, d, loss, flat_grad, gtd)
+                # torch.cuda.nvtx.range_push(f"LBFGS_add_grad_iter{n_iter}")
                 self._add_grad(t, d)
+                # torch.cuda.nvtx.range_pop()
                 opt_cond = flat_grad.abs().max() <= tolerance_grad
             else:
                 # no line search, simply move with fixed-step
+                # torch.cuda.nvtx.range_push(f"LBFGS_add_grad_iter{n_iter}")
                 self._add_grad(t, d)
+                # torch.cuda.nvtx.range_pop()
                 if n_iter != max_iter:
                     # re-evaluate function only if not in last iteration
                     # the reason we do this: in a stochastic setting,
                     # no use to re-evaluate that function here
+                    # torch.cuda.nvtx.range_push(f"LBFGS_closure_eval_iter{n_iter}")
                     loss = float(closure())
+                    # torch.cuda.nvtx.range_pop()
                     flat_grad = self._gather_flat_grad()
                     opt_cond = flat_grad.abs().max() <= tolerance_grad
                     ls_func_evals = 1
@@ -437,10 +467,11 @@ class LBFGS(Optimizer):
             # update func eval
             current_evals += ls_func_evals
             state['func_evals'] += ls_func_evals
-
+            # torch.cuda.nvtx.range_pop()
             ############################################################
             # check conditions
             ############################################################
+            # torch.cuda.nvtx.range_push(f"LBFGS_check_conditions_iter{n_iter}")
             if n_iter == max_iter:
                 break
 
@@ -457,7 +488,11 @@ class LBFGS(Optimizer):
 
             if abs(loss - prev_loss) < tolerance_change:
                 break
+            # torch.cuda.nvtx.range_pop()
 
+
+        torch.cuda.nvtx.range_pop()  # LBFGS_optimization_loop
+        torch.cuda.nvtx.range_push("LBFGS_store_state")
         state['d'] = d
         state['t'] = t
         state['old_dirs'] = old_dirs
@@ -466,6 +501,248 @@ class LBFGS(Optimizer):
         state['H_diag'] = H_diag
         state['prev_flat_grad'] = prev_flat_grad
         state['prev_loss'] = prev_loss
-
+        torch.cuda.nvtx.range_pop()  # LBFGS_store_state
         return orig_loss
+
+# class LBFGS(Optimizer):
+#     """L-BFGS Optimizer with optional CUDA Graph support."""
+
+#     def __init__(self,
+#                  params,
+#                  lr=1,
+#                  max_iter=20,
+#                  max_eval=None,
+#                  tolerance_grad=1e-5,
+#                  tolerance_change=1e-9,
+#                  history_size=10,
+#                  line_search_fn=None,
+#                  use_cuda_graph=True):
+#         if max_eval is None:
+#             max_eval = max_iter * 5 // 4
+#         defaults = dict(
+#             lr=lr,
+#             max_iter=max_iter,
+#             max_eval=max_eval,
+#             tolerance_grad=tolerance_grad,
+#             tolerance_change=tolerance_change,
+#             history_size=history_size,
+#             line_search_fn=line_search_fn
+#         )
+#         super(LBFGS, self).__init__(params, defaults)
+
+#         if len(self.param_groups) != 1:
+#             raise ValueError("LBFGS doesn't support per-parameter options "
+#                              "(parameter groups)")
+#         self._params = self.param_groups[0]['params']
+#         self._numel_cache = None
+
+#         # CUDA Graph support
+#         self._use_cuda_graph = use_cuda_graph
+#         self._cg_buffers = {}
+
+#     def _numel(self):
+#         if self._numel_cache is None:
+#             self._numel_cache = reduce(lambda total, p: total + p.numel(), self._params, 0)
+#         return self._numel_cache
+
+#     def _gather_flat_grad(self):
+#         views = []
+#         for p in self._params:
+#             if p.grad is None:
+#                 views.append(p.new_zeros(p.numel()))
+#             elif p.grad.is_sparse:
+#                 views.append(p.grad.to_dense().view(-1))
+#             else:
+#                 views.append(p.grad.view(-1))
+#         return torch.cat(views, 0)
+
+#     def _add_grad(self, step_size, update):
+#         offset = 0
+#         for p in self._params:
+#             numel = p.numel()
+#             p.data.add_(update[offset:offset + numel].view_as(p.data), alpha=step_size)
+#             offset += numel
+#         assert offset == self._numel()
+
+#     def _clone_param(self):
+#         return [p.clone() for p in self._params]
+
+#     def _set_param(self, params_data):
+#         for p, pdata in zip(self._params, params_data):
+#             p.data.copy_(pdata)
+
+#     def _directional_evaluate(self, closure, x, t, d):
+#         self._add_grad(t, d)
+#         loss = float(closure())
+#         flat_grad = self._gather_flat_grad()
+#         self._set_param(x)
+#         return loss, flat_grad
+
+#     def step(self, closure):
+#         assert len(self.param_groups) == 1
+
+#         group = self.param_groups[0]
+#         lr = group['lr']
+#         max_iter = group['max_iter']
+#         max_eval = group['max_eval']
+#         tolerance_grad = group['tolerance_grad']
+#         tolerance_change = group['tolerance_change']
+#         line_search_fn = group['line_search_fn']
+#         history_size = group['history_size']
+
+#         state = self.state[self._params[0]]
+#         state.setdefault('func_evals', 0)
+#         state.setdefault('n_iter', 0)
+
+#         torch.cuda.nvtx.range_push("LBFGS_initial_closure")
+#         orig_loss = closure()
+#         torch.cuda.nvtx.range_pop()
+#         loss = float(orig_loss)
+#         current_evals = 1
+#         state['func_evals'] += 1
+
+#         flat_grad = self._gather_flat_grad()
+#         if flat_grad.abs().max() <= tolerance_grad:
+#             return orig_loss
+
+#         # cached tensors
+#         d = state.get('d')
+#         t = state.get('t')
+#         old_dirs = state.get('old_dirs')
+#         old_stps = state.get('old_stps')
+#         ro = state.get('ro')
+#         H_diag = state.get('H_diag')
+#         prev_flat_grad = state.get('prev_flat_grad')
+#         prev_loss = state.get('prev_loss')
+
+#         n_iter = 0
+#         while n_iter < max_iter:
+#             n_iter += 1
+#             state['n_iter'] += 1
+
+#             # -----------------------------
+#             # Compute descent direction
+#             # -----------------------------
+#             if state['n_iter'] == 1:
+#                 d = flat_grad.neg()
+#                 old_dirs, old_stps, ro = [], [], []
+#                 H_diag = 1
+#             else:
+#                 y = flat_grad.sub(prev_flat_grad)
+#                 s = d.mul(t)
+#                 ys = y.dot(s)
+#                 if ys > 1e-10:
+#                     if len(old_dirs) == history_size:
+#                         old_dirs.pop(0)
+#                         old_stps.pop(0)
+#                         ro.pop(0)
+#                     old_dirs.append(y)
+#                     old_stps.append(s)
+#                     ro.append(1. / ys)
+#                     H_diag = ys / y.dot(y)
+
+#                 num_old = len(old_dirs)
+#                 if 'al' not in state:
+#                     state['al'] = [None] * history_size
+#                 al = state['al']
+
+#                 torch.cuda.nvtx.range_push(f"LBFGS_two_loop_iter{n_iter}")
+#                 q = flat_grad.neg()
+
+#                 if self._use_cuda_graph:
+#                     # initialize buffers
+#                     if 'q_buf' not in self._cg_buffers:
+#                         self._cg_buffers['q_buf'] = q.clone()
+#                         self._cg_buffers['r_buf'] = torch.empty_like(q)
+#                     q_buf = self._cg_buffers['q_buf']
+#                     r_buf = self._cg_buffers['r_buf']
+#                     q_buf.copy_(q)
+
+#                     for i in range(num_old - 1, -1, -1):
+#                         al[i] = old_stps[i].dot(q_buf) * ro[i]
+#                         q_buf.add_(old_dirs[i], alpha=-al[i])
+
+#                     r_buf.copy_(q_buf)
+#                     r_buf.mul_(H_diag)
+#                     for i in range(num_old):
+#                         be_i = old_dirs[i].dot(r_buf) * ro[i]
+#                         r_buf.add_(old_stps[i], alpha=(al[i] - be_i))
+#                     d = r_buf
+#                 else:
+#                     for i in range(num_old - 1, -1, -1):
+#                         al[i] = old_stps[i].dot(q) * ro[i]
+#                         q.add_(old_dirs[i], alpha=-al[i])
+#                     r = q * H_diag
+#                     for i in range(num_old):
+#                         be_i = old_dirs[i].dot(r) * ro[i]
+#                         r.add_(old_stps[i], alpha=(al[i] - be_i))
+#                     d = r
+#                 torch.cuda.nvtx.range_pop()
+
+#             if prev_flat_grad is None:
+#                 prev_flat_grad = flat_grad.clone()
+#             else:
+#                 prev_flat_grad.copy_(flat_grad)
+#             prev_loss = loss
+
+#             # -----------------------------
+#             # Compute step size
+#             # -----------------------------
+#             if state['n_iter'] == 1:
+#                 t = min(1., 1. / flat_grad.abs().sum()) * lr
+#             else:
+#                 t = lr
+
+#             gtd = flat_grad.dot(d)
+#             if gtd > -tolerance_change:
+#                 break
+
+#             ls_func_evals = 0
+#             if line_search_fn is not None:
+#                 if line_search_fn != "strong_wolfe":
+#                     raise RuntimeError("only 'strong_wolfe' is supported")
+#                 else:
+#                     x_init = self._clone_param()
+#                     def obj_func(x, t, d): 
+#                         return self._directional_evaluate(closure, x, t, d)
+#                     loss, flat_grad, t, ls_func_evals = _strong_wolfe(
+#                         obj_func, x_init, t, d, loss, flat_grad, gtd)
+#                 torch.cuda.nvtx.range_push(f"LBFGS_add_grad_iter{n_iter}")
+#                 self._add_grad(t, d)
+#                 torch.cuda.nvtx.range_pop()
+#                 opt_cond = flat_grad.abs().max() <= tolerance_grad
+#             else:
+#                 torch.cuda.nvtx.range_push(f"LBFGS_add_grad_iter{n_iter}")
+#                 self._add_grad(t, d)
+#                 torch.cuda.nvtx.range_pop()
+#                 if n_iter != max_iter:
+#                     torch.cuda.nvtx.range_push(f"LBFGS_closure_eval_iter{n_iter}")
+#                     loss = float(closure())
+#                     torch.cuda.nvtx.range_pop()
+#                     flat_grad = self._gather_flat_grad()
+#                     opt_cond = flat_grad.abs().max() <= tolerance_grad
+#                     ls_func_evals = 1
+
+#             current_evals += ls_func_evals
+#             state['func_evals'] += ls_func_evals
+
+#             if n_iter == max_iter or current_evals >= max_eval:
+#                 break
+#             if opt_cond:
+#                 break
+#             if d.mul(t).abs().max() <= tolerance_change:
+#                 break
+#             if abs(loss - prev_loss) < tolerance_change:
+#                 break
+
+#         state['d'] = d
+#         state['t'] = t
+#         state['old_dirs'] = old_dirs
+#         state['old_stps'] = old_stps
+#         state['ro'] = ro
+#         state['H_diag'] = H_diag
+#         state['prev_flat_grad'] = prev_flat_grad
+#         state['prev_loss'] = prev_loss
+
+#         return orig_loss
 

@@ -112,14 +112,16 @@ def get_interp_by_keypoints(keypoints):
         ranges.append((start, not_valid_frames[-1]))
     def interp_func(params):
         for start, end in ranges:
-            # 对每个需要插值的区间: 这里直接使用最近帧进行插值了
             left = start - 1
             right = end + 1
-            for nf in range(start, end+1):
-                weight = (nf - left)/(right - left)
+            for nf in range(start, end + 1):
+                weight = (nf - left) / (right - left)
                 for key in ['Rh', 'Th', 'poses']:
-                    params[key][nf] = interp(params[key][left], params[key][right], 1-weight, key=key)
+                    # 檢查 index 邊界是否合法
+                    if nf < len(params[key]) and left >= 0 and right < len(params[key]):
+                        params[key][nf] = interp(params[key][left], params[key][right], 1 - weight, key=key)
         return params
+
     return interp_func
 
 def interp_by_k3d(conf, params):

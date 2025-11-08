@@ -527,11 +527,146 @@ class ComposeVit(nn.Module):
 from ..basetopdown import BaseTopDownModelCache
 from ..topdown_keypoints import BaseKeypoints
 
+# class MyViT(BaseTopDownModelCache, BaseKeypoints):
+#     def __init__(self, ckpt='data/models/vitpose+_base.pth', single_person=True, url='https://1drv.ms/u/s!AimBgYV7JjTlgcckRZk1bIAuRa_E1w?e=ylDB2G', **kwargs):
+#         super().__init__(name='myvit', bbox_scale=1.25,
+#                          res_input=[192, 256], **kwargs)
+#         self.single_person = single_person
+#         model = ComposeVit()
+#         if not os.path.exists(ckpt):
+#             print('')
+#             print('{} not exists, please download it from {} and place it to {}'.format(ckpt, url, ckpt))
+#             print('')
+#             raise FileNotFoundError
+#         ckpt = torch.load(ckpt, map_location='cpu')['state_dict']
+#         ckpt_backbone = {key:val for key, val in ckpt.items() if key.startswith('backbone.')}
+#         ckpt_head = {key:val for key, val in ckpt.items() if key.startswith('keypoint_head.')}
+#         key_whole = 'associate_keypoint_heads.4.'
+#         ckpt_head_133 = {key.replace(key_whole, 'associate_head.'):val for key, val in ckpt.items() if key.startswith(key_whole)}
+#         ckpt_backbone.update(ckpt_head)
+#         ckpt_backbone.update(ckpt_head_133)
+#         state_dict = ckpt_backbone
+#         self.load_checkpoint(model, state_dict, prefix='', strict=True)
+#         model.eval()
+#         self.model = model
+#         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+#         self.model.to(self.device)
+
+#     def dump(self, cachename, output):
+#         _output = output['output']
+#         kpts = self.get_max_preds(_output)
+#         kpts_ori = self.batch_affine_transform(kpts, output['inv_trans'])
+#         kpts = np.concatenate([kpts_ori, kpts[..., -1:]], axis=-1)
+#         output = {'keypoints': kpts}
+#         super().dump(cachename, output)
+#         return output
+
+#     def estimate_keypoints(self, bbox, images, imgnames):
+#         squeeze = False
+#         if not isinstance(images, list):
+#             images = [images]
+#             imgnames = [imgnames]
+#             bbox = [bbox]
+#             squeeze = True
+#         nViews = len(images)
+#         kpts_all = []
+#         for nv in range(nViews):
+#             # print(f"[DEBUG] Frame {imgnames[nv]} → detected persons: {bbox[nv].shape[0]}")
+#             _bbox = bbox[nv]
+#             if _bbox.shape[0] == 0:
+#                 if self.single_person:
+#                     kpts = np.zeros((1, self.num_joints, 3))
+#                 else:
+#                     kpts = np.zeros((_bbox.shape[0], self.num_joints, 3))
+#             else:
+#                 img = images[nv]
+#                 # TODO: add flip test
+#                 out = super().__call__(_bbox, img, imgnames[nv])
+#                 kpts = out['params']['keypoints']
+#             if kpts.shape[-2] == 23:
+#                 kpts = self.coco23tobody25(kpts)
+#             elif kpts.shape[-2] == 17:
+#                 kpts = self.coco17tobody25(kpts)
+#             else:
+#                 raise NotImplementedError
+#             kpts_all.append(kpts)
+#         if self.single_person:
+#             kpts_all = [k[0] for k in kpts_all]
+#             kpts_all = np.stack(kpts_all)
+#         if squeeze:
+#             kpts_all = kpts_all[0]
+#         return {
+#             'keypoints': kpts_all
+#         }
+#     # def estimate_keypoints(self, bbox, images, imgnames):
+#     #     squeeze = False
+#     #     if not isinstance(images, list):
+#     #         images = [images]
+#     #         imgnames = [imgnames]
+#     #         bbox = [bbox]
+#     #         squeeze = True
+#     #     nViews = len(images)
+
+#     #     # ====== DEBUG LOG START ======
+#     #     print(f"[MyViT] estimate_keypoints called")
+#     #     print(f"  nViews: {nViews}")
+#     #     for nv in range(nViews):
+#     #         print(f"  View {nv}:")
+#     #         print(f"    imgnames: {imgnames[nv]}")
+#     #         print(f"    images type: {type(images[nv])}, shape: {getattr(images[nv], 'shape', None)}")
+#     #         print(f"    bbox type: {type(bbox[nv])}, shape: {getattr(bbox[nv], 'shape', None)}, dtype: {getattr(bbox[nv], 'dtype', None)}")
+#     #         if isinstance(bbox[nv], np.ndarray) and bbox[nv].size > 0:
+#     #             print(f"    bbox[0]: {bbox[nv][0]}")
+#     #     # ====== DEBUG LOG END ======
+
+#     #     kpts_all = []
+#     #     for nv in range(nViews):
+#     #         _bbox = bbox[nv]
+#     #         if _bbox.shape[0] == 0:
+#     #             if self.single_person:
+#     #                 kpts = np.zeros((1, self.num_joints, 3))
+#     #             else:
+#     #                 kpts = np.zeros((_bbox.shape[0], self.num_joints, 3))
+#     #         else:
+#     #             img = images[nv]
+#     #             out = super().__call__(_bbox, img, imgnames[nv])
+#     #             kpts = out['params']['keypoints']
+#     #         if kpts.shape[-2] == 23:
+#     #             kpts = self.coco23tobody25(kpts)
+#     #         elif kpts.shape[-2] == 17:
+#     #             kpts = self.coco17tobody25(kpts)
+#     #         else:
+#     #             raise NotImplementedError
+#     #         kpts_all.append(kpts)
+#     #     if self.single_person:
+#     #         kpts_all = [k[0] for k in kpts_all]
+#     #         kpts_all = np.stack(kpts_all)
+#     #     if squeeze:
+#     #         kpts_all = kpts_all[0]
+#     #     return {
+#     #         'keypoints': kpts_all
+#     #     }
+
+#     def __call__(self, bbox, images, imgnames):
+#         return self.estimate_keypoints(bbox, images, imgnames)
+
+# if __name__ == '__main__':
+#     # Load checkpoint
+#     rand_input = torch.rand(1, 3, 256, 192)
+#     model = MyViT()
+
+
+
 class MyViT(BaseTopDownModelCache, BaseKeypoints):
-    def __init__(self, ckpt='data/models/vitpose+_base.pth', single_person=True, url='https://1drv.ms/u/s!AimBgYV7JjTlgcckRZk1bIAuRa_E1w?e=ylDB2G', **kwargs):
+    def __init__(self, ckpt='data/models/vitpose+_base.pth', single_person=False, 
+                batch_size=1024, use_amp=True, 
+                url='https://1drv.ms/u/s!AimBgYV7JjTlgcckRZk1bIAuRa_E1w?e=ylDB2G', **kwargs):
         super().__init__(name='myvit', bbox_scale=1.25,
-                         res_input=[192, 256], **kwargs)
+                        res_input=[192, 256], **kwargs)
         self.single_person = single_person
+        self.batch_size = batch_size
+        self.use_amp = use_amp  # 新增: AMP 開關
+        
         model = ComposeVit()
         if not os.path.exists(ckpt):
             print('')
@@ -551,6 +686,19 @@ class MyViT(BaseTopDownModelCache, BaseKeypoints):
         self.model = model
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
         self.model.to(self.device)
+        
+        # 檢查 AMP 可用性
+        if self.use_amp:
+            if torch.cuda.is_available() and hasattr(torch.cuda.amp, 'autocast'):
+                # 檢查 GPU 架構 (Ampere 以上效果最好)
+                gpu_name = torch.cuda.get_device_name(0)
+                if 'RTX 30' in gpu_name or 'RTX 40' in gpu_name or 'A100' in gpu_name or 'A10' in gpu_name:
+                    print(f"✓ AMP enabled on {gpu_name} (optimized for this GPU)")
+                else:
+                    print(f"✓ AMP enabled on {gpu_name} (may have modest speedup)")
+            else:
+                print("✗ AMP not available (CUDA not available or PyTorch version < 1.6)")
+                self.use_amp = False
 
     def dump(self, cachename, output):
         _output = output['output']
@@ -561,6 +709,113 @@ class MyViT(BaseTopDownModelCache, BaseKeypoints):
         super().dump(cachename, output)
         return output
 
+    # def estimate_keypoints(self, bbox, images, imgnames):
+    #     squeeze = False
+    #     if not isinstance(images, list):
+    #         images = [images]
+    #         imgnames = [imgnames]
+    #         bbox = [bbox]
+    #         squeeze = True
+        
+    #     nViews = len(images)
+        
+    #     valid_images = []
+    #     valid_bboxes = []
+    #     valid_imgnames = []
+    #     view_info = []
+        
+    #     for nv in range(nViews):
+    #         _bbox = bbox[nv]
+    #         num_persons = _bbox.shape[0]
+    #         view_info.append(num_persons)
+            
+    #         if num_persons > 0:
+    #             valid_images.append(images[nv])
+    #             valid_bboxes.append(_bbox)
+    #             valid_imgnames.append(imgnames[nv])
+        
+    #     # 如果沒有任何檢測框，返回空結果
+    #     if len(valid_images) == 0:
+    #         kpts_all = []
+    #         for nv in range(nViews):
+    #             if self.single_person:
+    #                 kpts = np.zeros((1, self.num_joints, 3))
+    #             else:
+    #                 kpts = np.zeros((0, self.num_joints, 3))
+    #             kpts_all.append(kpts)
+            
+    #         if self.single_person:
+    #             kpts_all = np.stack(kpts_all)
+    #         if squeeze:
+    #             kpts_all = kpts_all[0]
+    #         return {'keypoints': kpts_all}
+        
+    #     # ========== 使用 infer_batch 進行跨 View Batch 推理 ==========
+    #     # 分批處理（如果總數超過 batch_size）
+    #     total_persons = sum(view_info)
+        
+    #     if total_persons <= self.batch_size:
+    #         output = self.infer_batch(valid_images, valid_bboxes, to_numpy=True)
+    #         all_kpts = self.get_max_preds(output['output'])
+    #         kpts_ori = self.batch_affine_transform(all_kpts, output['inv_trans'])
+    #         all_kpts = np.concatenate([kpts_ori, all_kpts[..., -1:]], axis=-1)
+    #     else:
+    #         all_kpts_list = []
+    #         processed = 0
+            
+    #         for vid, (img, bbox_arr, imgname) in enumerate(zip(valid_images, valid_bboxes, valid_imgnames)):
+    #             num_persons = bbox_arr.shape[0]
+                
+    #             # 如果當前 view 的人數超過 batch_size，需進一步分批
+    #             for i in range(0, num_persons, self.batch_size):
+    #                 batch_bbox = bbox_arr[i:i+self.batch_size]
+                    
+    #                 output = self.infer_batch(img, batch_bbox, to_numpy=True)
+    #                 batch_kpts = self.get_max_preds(output['output'])
+    #                 kpts_ori = self.batch_affine_transform(batch_kpts, output['inv_trans'])
+    #                 batch_kpts = np.concatenate([kpts_ori, batch_kpts[..., -1:]], axis=-1)
+    #                 all_kpts_list.append(batch_kpts)
+            
+    #         all_kpts = np.concatenate(all_kpts_list, axis=0)
+        
+
+    #     kpts_all = []
+    #     kpt_idx = 0
+        
+    #     for nv in range(nViews):
+    #         num_persons = view_info[nv]
+            
+    #         if num_persons == 0:
+    #             if self.single_person:
+    #                 kpts = np.zeros((1, self.num_joints, 3))
+    #             else:
+    #                 kpts = np.zeros((0, self.num_joints, 3))
+    #         else:
+    #             kpts = all_kpts[kpt_idx:kpt_idx + num_persons]
+    #             kpt_idx += num_persons
+            
+    #         # 轉換關鍵點格式
+    #         if kpts.shape[-2] == 23:
+    #             kpts = self.coco23tobody25(kpts)
+    #         elif kpts.shape[-2] == 17:
+    #             kpts = self.coco17tobody25(kpts)
+    #         else:
+    #             raise NotImplementedError
+            
+    #         kpts_all.append(kpts)
+        
+    #     # 處理 single_person 模式
+    #     if self.single_person:
+    #         kpts_all = [k[0:1] if k.shape[0] > 0 else np.zeros((1, self.num_joints, 3)) 
+    #                    for k in kpts_all]
+    #         kpts_all = np.stack(kpts_all)
+        
+    #     if squeeze:
+    #         kpts_all = kpts_all[0]
+        
+    #     return {
+    #         'keypoints': kpts_all
+    #     }
     def estimate_keypoints(self, bbox, images, imgnames):
         squeeze = False
         if not isinstance(images, list):
@@ -568,40 +823,86 @@ class MyViT(BaseTopDownModelCache, BaseKeypoints):
             imgnames = [imgnames]
             bbox = [bbox]
             squeeze = True
+        
         nViews = len(images)
-        kpts_all = []
-        for nv in range(nViews):
-            _bbox = bbox[nv]
-            if _bbox.shape[0] == 0:
+        
+        # Step 1: 統計每個 view 的人數
+        view_info = [b.shape[0] for b in bbox]
+        total_persons = sum(view_info)
+        
+        # Step 2: 處理無檢測框的情況
+        if total_persons == 0:
+            kpts_all = []
+            for nv in range(nViews):
                 if self.single_person:
                     kpts = np.zeros((1, self.num_joints, 3))
                 else:
-                    kpts = np.zeros((_bbox.shape[0], self.num_joints, 3))
+                    kpts = np.zeros((0, self.num_joints, 3))
+                kpts_all.append(kpts)
+            
+            if self.single_person:
+                kpts_all = np.stack(kpts_all)
+            if squeeze:
+                kpts_all = kpts_all[0]
+            return {'keypoints': kpts_all}
+        
+        # Step 3: 使用優化的 infer_batch 進行批次推理
+        output = self.infer_batch(images, bbox, to_numpy=True)
+        
+        # Step 4: 提取關鍵點
+        all_heatmaps = output['output']
+        if all_heatmaps.ndim == 3:
+            all_heatmaps = all_heatmaps[None, ...]
+        
+        all_kpts = self.get_max_preds(all_heatmaps)
+        kpts_ori = self.batch_affine_transform(all_kpts, output['inv_trans'])
+        all_kpts = np.concatenate([kpts_ori, all_kpts[..., -1:]], axis=-1)
+        
+        # Step 5: 批次化格式轉換
+        num_joints_detected = all_kpts.shape[-2]
+        if num_joints_detected == 23:
+            all_kpts = self.coco23tobody25(all_kpts)
+        elif num_joints_detected == 17:
+            all_kpts = self.coco17tobody25(all_kpts)
+        else:
+            raise NotImplementedError(f"Unsupported number of joints: {num_joints_detected}")
+        
+        # Step 6: 分配關鍵點回各個 view
+        kpts_all = []
+        kpt_idx = 0
+        
+        for nv in range(nViews):
+            num_persons = view_info[nv]
+            
+            if num_persons == 0:
+                if self.single_person:
+                    kpts = np.zeros((1, self.num_joints, 3))
+                else:
+                    kpts = np.zeros((0, self.num_joints, 3))
             else:
-                img = images[nv]
-                # TODO: add flip test
-                out = super().__call__(_bbox, img, imgnames[nv])
-                kpts = out['params']['keypoints']
-            if kpts.shape[-2] == 23:
-                kpts = self.coco23tobody25(kpts)
-            elif kpts.shape[-2] == 17:
-                kpts = self.coco17tobody25(kpts)
-            else:
-                raise NotImplementedError
+                kpts = all_kpts[kpt_idx:kpt_idx + num_persons]
+                kpt_idx += num_persons
+                
+                # single_person 模式: 只保留第一個人
+                if self.single_person:
+                    kpts = kpts[0:1]
+            
             kpts_all.append(kpts)
+        
+        # Step 7: 處理輸出格式
         if self.single_person:
-            kpts_all = [k[0] for k in kpts_all]
             kpts_all = np.stack(kpts_all)
+        
         if squeeze:
             kpts_all = kpts_all[0]
-        return {
-            'keypoints': kpts_all
-        }
+        
+        return {'keypoints': kpts_all}
+
 
     def __call__(self, bbox, images, imgnames):
         return self.estimate_keypoints(bbox, images, imgnames)
-
+    
 if __name__ == '__main__':
-    # Load checkpoint
+    # Load checkpoint with true cross-view batch processing
     rand_input = torch.rand(1, 3, 256, 192)
     model = MyViT()

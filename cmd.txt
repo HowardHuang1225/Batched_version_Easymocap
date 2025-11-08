@@ -1,0 +1,28 @@
+docker build -f Dockerfile.easymocap -t easymocap:latest .
+
+
+docker run --gpus all -it --rm \
+    -v /home/mislab/Lab_tasks/docker_test/EasyMocap:/workspace/EasyMocap \
+    -v /home/mislab/Lab_tasks/docker_test/Data:/workspace/Data \
+    easymocap:latest
+
+docker run --gpus all -it \
+    --name easymocap-dev \
+    -v /home/mislab/Lab_tasks/docker_test/Data:/workspace/Data \
+    easymocap:latest
+
+docker start -ai easymocap-dev
+
+
+
+
+emc --data config/datasets/mvimage.yml --exp config/mvmp/detect_match_triangulate_fitSMPL.yml \
+  --root ../Data/data/baseball0/mocap \
+  --out ../Data/outputs/mocap/baseball0 \
+  --ranges 0 100 1
+
+
+
+data/baseball0 outputs/mocap/baseball0
+
+hahaha

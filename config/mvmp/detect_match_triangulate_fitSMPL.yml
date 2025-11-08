@@ -9,7 +9,7 @@ args:
       args:
         model: yolov5m
         name: person
-        min_length: 150 # this two threshold control the wanted bboxes
+        min_length: 100 # this two threshold control the wanted bboxes
         max_length: 1000
     # keypoints2d:
     #   module: myeasymocap.backbone.hrnet.myhrnet.MyHRNet
@@ -20,6 +20,7 @@ args:
     #     ckpt: data/models/pose_hrnet_w48_384x288.pth
     #     single_person: False # This flag controls the function to detect all keypoints
     keypoints2d:
+      # skip: True
       module: myeasymocap.backbone.vitpose.vit_moe.MyViT
       key_from_data: [images, imgnames]
       key_from_previous: [bbox]
@@ -29,7 +30,7 @@ args:
         single_person: False # This flag controls the function to detect all keypoints
     vis_2d:
       module: myeasymocap.io.vis.Vis2D
-      skip: False
+      skip: True
       key_from_data: [images]
       key_from_previous: [keypoints, bbox]
       args:
@@ -37,6 +38,7 @@ args:
         scale: 0.5
     match:
       module: myeasymocap.operations.match_base.MatchAndTrack
+      # skip: True
       key_from_data: [cameras, meta]
       key_from_previous: [keypoints]
       args:
@@ -63,12 +65,13 @@ args:
             dist_track: 100 # mm
         cfg_track:
           max_person: 100
-          max_missing: 3 # 最多丢失3帧就要删除
+          max_missing: 6 # 最多丢失3帧就要删除
           final_ranges: [[-10000, -10000, -10000], [10000, 10000, 10000]] # 最终的输出的range，仅用于输出的时候的筛选
           final_max_person: 100
           kintree: [[2, 3], [5, 6], [3, 4], [6, 7], [11, 22], [22, 23], [11, 24], [14, 19], [19, 20], [14, 21]]
     vis_kpts3d:
       module: myeasymocap.io.vis.Vis3D
+      skip: True
       key_from_data: [images, cameras]
       key_from_previous: [results] # 用于最后的一起优化
       args:
@@ -77,23 +80,27 @@ args:
   at_final:
     write_raw: # write the raw 3d keypoints
       module: myeasymocap.io.write.WriteAll
+      # skip: True
       key_from_data: [results, meta]
       args:
         name: keypoints3d_raw
     collect: # split the results of each frame to each person
       module: myeasymocap.stages.collect.CollectMultiPersonMultiFrame
+      # skip: True
       key_from_data: [keypoints3d, pids]
       args:
         key: keypoints3d
-        min_frame: 20
+        min_frame: 10
     load_body_model: # 载入身体模型
       module: myeasymocap.io.model.SMPLLoader
+      # skip: True
       args:
         model_path: models/pare/data/body_models/smpl/SMPL_NEUTRAL.pkl # load PARE model
         regressor_path: models/J_regressor_body25.npy
     #   # 这个模块返回两个内容：body_model, model; 其中的body_model是用来进行可视化的
     fitting_each_person:
       module: myeasymocap.stages.basestage.StageForFittingEach
+      # skip: True
       key_from_previous: [model, results]
       key_from_data: []
       args:
@@ -101,12 +108,14 @@ args:
         keys_keep: [params]
     write:
       module: myeasymocap.io.write.WriteSMPL
+      # skip: True
       key_from_data: [meta]
       key_from_previous: [results, model]
       args:
         name: smpl
     vis_render:
       module: myeasymocap.io.vis3d.RenderAll_multiview
+      skip: True
       key_from_data: [meta, cameras, imgnames]
       key_from_previous: [results, body_model]
       args:
@@ -115,6 +124,7 @@ args:
         scale: 0.5
     make_video:
       module: myeasymocap.io.video.MakeVideo
+      skip: True
       args:
         fps: 60
         keep_image: False

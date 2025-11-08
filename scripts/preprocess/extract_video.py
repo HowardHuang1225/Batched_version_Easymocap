@@ -15,7 +15,8 @@ import numpy as np
 mkdir = lambda x: os.makedirs(x, exist_ok=True)
 
 def extract_video(videoname, path, start, end, step):
-    base = os.path.basename(videoname).replace('.mp4', '')
+    base = os.path.splitext(os.path.basename(videoname))[0]
+    print(base)
     if not os.path.exists(videoname):
         return base
     outpath = join(path, 'images', base)
@@ -30,7 +31,7 @@ def extract_video(videoname, path, start, end, step):
     for cnt in tqdm(range(totalFrames), desc='{:10s}'.format(os.path.basename(videoname))):
         ret, frame = video.read()
         if cnt < start:continue
-        if cnt >= end:break
+        if end > 0 and cnt >= end: break
         if not ret:continue
         if (cnt % step ==0):
             cv2.imwrite(join(outpath, '{:06d}.jpg'.format(cnt)), frame)
@@ -253,10 +254,11 @@ if __name__ == "__main__":
         image_path = join(args.path, 'images')
         os.makedirs(image_path, exist_ok=True)
         subs_image = sorted(os.listdir(image_path))
-        subs_videos = sorted(glob(join(args.path, 'videos', '*.mp4')))
+        subs_videos = sorted(glob(join(args.path, 'videos', '*.[mM][pP]4')))
+        print(join(args.path, 'videos', '*.[mM][pP]4'))
+        subs = []
         if len(subs_videos) > len(subs_image):
-            videos = sorted(glob(join(args.path, 'videos', '*.mp4')))
-            subs = []
+            videos = sorted(glob(join(args.path, 'videos', '*.[mM][pP]4')))
             for video in videos:
                 basename = extract_video(video, args.path, start=args.start, end=args.end, step=args.step)
                 subs.append(basename)

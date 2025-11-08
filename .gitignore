@@ -116,3 +116,11 @@ code
 lightning_logs
 models
 yolov5m.pt
+log/
+cam3/
+*.nsys-rep
+*.sqlite
+*.pt
+*.engine
+*.onnx
+*.cache
