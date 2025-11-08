@@ -276,166 +276,6 @@ class BaseYOLOv11:
 
 
     
-# class BaseYOLOv5:
-#     def __init__(self, ckpt=None, model='yolov5m', name='object2d', multiview=True) -> None:
-#         if ckpt is not None:
-#             ckpt = check_modelpath(ckpt)
-#             self.model = torch.hub.load('ultralytics/yolov5', 'custom', ckpt)
-#         else:
-#             print('[{}] Not given ckpt, use default yolov5'.format(self.__class__.__name__))
-#             self.model = torch.hub.load('ultralytics/yolov5', model)
-#         # self.model = torch.compile(self.model)
-#         self.multiview = multiview
-#         self.name = name
-#         self.output = 'output'
-    
-#     def dump(self, cachename, output):
-#         os.makedirs(os.path.dirname(cachename), exist_ok=True)
-#         with open(cachename, 'wb') as f:
-#             pickle.dump(output, f)
-#         return output
-    
-#     def load(self, cachename):
-#         with open(cachename, 'rb') as f:
-#             output = pickle.load(f)
-#         return output
-
-#     def check_cache(self, imgname):
-#         basename = os.path.basename(imgname)
-#         imgext = '.' + basename.split('.')[-1]
-#         nv = imgname.split(os.sep)[-2]
-#         cachename = join(self.output, self.name, nv, basename.replace(imgext, '.npy'))
-#         os.makedirs(os.path.dirname(cachename), exist_ok=True)
-#         if os.path.exists(cachename):
-#             output = self.load(cachename)
-#             return True, output, cachename
-#         else:
-#             return False, None, cachename
-    
-#     def check_image(self, img_or_name):
-#         if isinstance(img_or_name, str):
-#             images = cv2.imread(img_or_name)
-#         else:
-#             images = img_or_name
-#         images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
-#         return images
-    
-#     @torch.no_grad()
-#     def detect(self, image, imgname):
-#         flag, cache, cachename = self.check_cache(imgname)
-#         if flag:
-#             return cache
-#         image = self.check_image(imgname)
-#         results = self.model(image) #RGB images[:,:,::-1]
-#         arrays = np.array(results.pandas().xyxy[0])
-#         res = {
-#             'results': arrays,
-#             'image_shape': image.shape,
-#         }
-#         self.dump(cachename, res)
-#         return res
-    
-#     @staticmethod
-#     def select_class(results, name):
-#         select = []
-#         for i, res in enumerate(results['results']):
-#             classname = res[6]
-#             if classname != name:
-#                 continue
-#             box = res[:5]
-#             select.append(box)
-#         select = np.stack(select)
-#         return select, results
-
-
-#     def select_bbox(self, select, results, imgname):
-#         if select.shape[0] == 0:
-#             return select
-#         # Naive: select the best
-#         idx = np.argsort(select[:, -1])[::-1]
-#         return select[idx[0:1]]
-#     # def select_bbox(self, select, top_k=1):
-#     #     if select.shape[0] == 0:
-#     #         return select
-#     #     idx = np.argsort(select[:, 4])[::-1]
-#     #     return select[idx[:top_k]]
-
-
-#     def __call__(self, images, imgnames):
-#         squeeze = False
-#         if not isinstance(images, list):
-#             images = [images]
-#             imgnames = [imgnames]
-#             squeeze = True
-
-#         detects = {'bbox': [[] for _ in range(len(images))]}
-
-#         # --------------------------
-#         # Step 1: 檢查 cache
-#         # --------------------------
-#         cache_flags, cache_results, cache_names, batch_imgs = [], [], [], []
-#         for img, name in zip(images, imgnames):
-#             flag, cache, cachename = self.check_cache(name)
-#             cache_flags.append(flag)
-#             cache_results.append(cache)
-#             cache_names.append(cachename)
-#             batch_imgs.append(None)
-
-#         # --------------------------
-#         # Step 2: 批量推論未 cache 的影像
-#         # --------------------------
-#         need_predict_idx = [i for i, f in enumerate(cache_flags) if not f]
-#         if len(need_predict_idx) > 0:
-#             # input_batch = [batch_imgs[i] for i in need_predict_idx]
-#             input_batch = [self.check_image(images[i]) for i in need_predict_idx]
-#             print(f"[YOLOv5] Batch predict {len(input_batch)} images")
-#             results_batch = self.model(input_batch)  # 一次處理多張
-        
-#             for idx, i in enumerate(need_predict_idx):
-#                 arrays = np.array(results_batch.pandas().xyxy[idx])
-#                 res = {'results': arrays, 'image_shape': input_batch[idx].shape}
-#                 self.dump(cache_names[i], res)
-#                 cache_results[i] = res
-
-#         # --------------------------
-#         # Step 3: 後處理每張影像
-#         # --------------------------
-#         for nv in range(len(images)):
-#             res = cache_results[nv]
-#             select, _ = self.select_class(res, self.name)
-#             if len(select) == 0:
-#                 select = np.zeros((0,5), dtype=np.float32)
-#             else:
-#                 select = np.array(select).astype(np.float32)
-#                 select = self.select_bbox(select, res, imgnames[nv])
-
-#             detects['bbox'][nv] = select
-
-#         if squeeze:
-#             detects['bbox'] = detects['bbox'][0]
-#         return detects
-
-#     # def __call__(self, images, imgnames): # 这里好像默认是多视角了，需要继承一下单视角的
-#     #     squeeze = False
-#     #     if not isinstance(images, list):
-#     #         images = [images]
-#     #         imgnames = [imgnames]
-#     #         squeeze = True
-#     #     detects = {'bbox': [[] for _ in range(len(images))]}
-#     #     for nv in range(len(images)):
-#     #         res = self.detect(images[nv], imgnames[nv])            
-#     #         select, res = self.select_class(res, self.name)
-#     #         if len(select) == 0:
-#     #             select = np.zeros((0,5), dtype=np.float32)
-#     #         else:
-#     #             select = np.stack(select).astype(np.float32)
-#     #         # TODO: add track here
-#     #         select = self.select_bbox(select, res, imgnames[nv])
-#     #         detects['bbox'][nv] = select
-#     #     if squeeze:
-#     #         detects['bbox'] = detects['bbox'][0]
-#     #     return detects
-
 class BaseYOLOv5:
     def __init__(self, ckpt=None, model='yolov5m', name='object2d', multiview=True) -> None:
         if ckpt is not None:
@@ -473,38 +313,11 @@ class BaseYOLOv5:
             return False, None, cachename
     
     def check_image(self, img_or_name):
-        """單張影像讀取與轉換"""
         if isinstance(img_or_name, str):
-            images = cv2.imread(img_or_name, cv2.IMREAD_COLOR)
-            if images is None:
-                raise ValueError(f"Failed to read image: {img_or_name}")
+            images = cv2.imread(img_or_name)
         else:
             images = img_or_name
         images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
-        return images
-
-
-    def check_images_batch(self, img_or_names, max_workers=32):
-        """批次並行讀取影像"""
-        from concurrent.futures import ThreadPoolExecutor
-        
-        def load_one(img_or_name):
-            if isinstance(img_or_name, str):
-                img = cv2.imread(img_or_name, cv2.IMREAD_COLOR)
-                if img is None:
-                    raise ValueError(f"Failed to read image: {img_or_name}")
-                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            else:
-                # 如果已經是 numpy array
-                if isinstance(img_or_name, np.ndarray):
-                    # 假設輸入可能是 BGR，需要轉換
-                    if len(img_or_name.shape) == 3 and img_or_name.shape[2] == 3:
-                        return cv2.cvtColor(img_or_name, cv2.COLOR_BGR2RGB)
-                return img_or_name
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            images = list(executor.map(load_one, img_or_names))
-        
         return images
     
     @torch.no_grad()
@@ -541,65 +354,252 @@ class BaseYOLOv5:
         # Naive: select the best
         idx = np.argsort(select[:, -1])[::-1]
         return select[idx[0:1]]
-
-    @torch.no_grad()
-    def detect_batch(self, images, parallel_load=True):
-        """批次推論（支援並行讀取）"""
-        if parallel_load:
-            input_batch = self.check_images_batch(images)
-        else:
-            input_batch = [self.check_image(img) for img in images]
-        
-        print(f"[YOLOv5] Batch predict {len(input_batch)} images")
-        
-        results_batch = self.model(input_batch)
-        
-        pandas_results = results_batch.pandas().xyxy
-        
-        results = []
-        for idx in range(len(images)):
-            arrays = np.array(pandas_results[idx])
-            res = {
-                'results': arrays, 
-                'image_shape': input_batch[idx].shape
-            }
-            results.append(res)
-        
-        return results
+    # def select_bbox(self, select, top_k=1):
+    #     if select.shape[0] == 0:
+    #         return select
+    #     idx = np.argsort(select[:, 4])[::-1]
+    #     return select[idx[:top_k]]
 
 
-    def __call__(self, images, imgnames=None):
+    # def __call__(self, images, imgnames):
+    #     squeeze = False
+    #     if not isinstance(images, list):
+    #         images = [images]
+    #         imgnames = [imgnames]
+    #         squeeze = True
+
+    #     detects = {'bbox': [[] for _ in range(len(images))]}
+
+    #     # --------------------------
+    #     # Step 1: 檢查 cache
+    #     # --------------------------
+    #     cache_flags, cache_results, cache_names, batch_imgs = [], [], [], []
+    #     for img, name in zip(images, imgnames):
+    #         flag, cache, cachename = self.check_cache(name)
+    #         cache_flags.append(flag)
+    #         cache_results.append(cache)
+    #         cache_names.append(cachename)
+    #         batch_imgs.append(None)
+
+    #     # --------------------------
+    #     # Step 2: 批量推論未 cache 的影像
+    #     # --------------------------
+    #     need_predict_idx = [i for i, f in enumerate(cache_flags) if not f]
+    #     if len(need_predict_idx) > 0:
+    #         # input_batch = [batch_imgs[i] for i in need_predict_idx]
+    #         input_batch = [self.check_image(images[i]) for i in need_predict_idx]
+    #         print(f"[YOLOv5] Batch predict {len(input_batch)} images")
+    #         results_batch = self.model(input_batch)  # 一次處理多張
+        
+    #         for idx, i in enumerate(need_predict_idx):
+    #             arrays = np.array(results_batch.pandas().xyxy[idx])
+    #             res = {'results': arrays, 'image_shape': input_batch[idx].shape}
+    #             self.dump(cache_names[i], res)
+    #             cache_results[i] = res
+
+    #     # --------------------------
+    #     # Step 3: 後處理每張影像
+    #     # --------------------------
+    #     for nv in range(len(images)):
+    #         res = cache_results[nv]
+    #         select, _ = self.select_class(res, self.name)
+    #         if len(select) == 0:
+    #             select = np.zeros((0,5), dtype=np.float32)
+    #         else:
+    #             select = np.array(select).astype(np.float32)
+    #             select = self.select_bbox(select, res, imgnames[nv])
+
+    #         detects['bbox'][nv] = select
+
+    #     if squeeze:
+    #         detects['bbox'] = detects['bbox'][0]
+    #     return detects
+
+    def __call__(self, images, imgnames): # 这里好像默认是多视角了，需要继承一下单视角的
         squeeze = False
         if not isinstance(images, list):
             images = [images]
+            imgnames = [imgnames]
             squeeze = True
-        
-        num_images = len(images)
-        detects = {'bbox': [None] * num_images}
-        
-        results = self.detect_batch(images, parallel_load=True)
-
-        for i in range(num_images):
-            res = results[i]
-            results_array = res['results']
-            
-            if len(results_array) == 0:
-                detects['bbox'][i] = np.zeros((0, 5), dtype=np.float32)
-                continue
-            
-            class_mask = results_array[:, 6] == self.name
-            select = results_array[class_mask, :5].astype(np.float32)
-            
+        detects = {'bbox': [[] for _ in range(len(images))]}
+        for nv in range(len(images)):
+            res = self.detect(images[nv], imgnames[nv])            
+            select, res = self.select_class(res, self.name)
             if len(select) == 0:
-                detects['bbox'][i] = np.zeros((0, 5), dtype=np.float32)
+                select = np.zeros((0,5), dtype=np.float32)
             else:
-                imgname = imgnames[i] if imgnames is not None else None
-                detects['bbox'][i] = self.select_bbox(select, res, imgname)
-        
+                select = np.stack(select).astype(np.float32)
+            # TODO: add track here
+            select = self.select_bbox(select, res, imgnames[nv])
+            detects['bbox'][nv] = select
         if squeeze:
             detects['bbox'] = detects['bbox'][0]
-        
         return detects
+
+# class BaseYOLOv5:
+#     def __init__(self, ckpt=None, model='yolov5m', name='object2d', multiview=True) -> None:
+#         if ckpt is not None:
+#             ckpt = check_modelpath(ckpt)
+#             self.model = torch.hub.load('ultralytics/yolov5', 'custom', ckpt)
+#         else:
+#             print('[{}] Not given ckpt, use default yolov5'.format(self.__class__.__name__))
+#             self.model = torch.hub.load('ultralytics/yolov5', model)
+#         # self.model = torch.compile(self.model)
+#         self.multiview = multiview
+#         self.name = name
+#         self.output = 'output'
+    
+#     def dump(self, cachename, output):
+#         os.makedirs(os.path.dirname(cachename), exist_ok=True)
+#         with open(cachename, 'wb') as f:
+#             pickle.dump(output, f)
+#         return output
+    
+#     def load(self, cachename):
+#         with open(cachename, 'rb') as f:
+#             output = pickle.load(f)
+#         return output
+
+#     def check_cache(self, imgname):
+#         basename = os.path.basename(imgname)
+#         imgext = '.' + basename.split('.')[-1]
+#         nv = imgname.split(os.sep)[-2]
+#         cachename = join(self.output, self.name, nv, basename.replace(imgext, '.npy'))
+#         os.makedirs(os.path.dirname(cachename), exist_ok=True)
+#         if os.path.exists(cachename):
+#             output = self.load(cachename)
+#             return True, output, cachename
+#         else:
+#             return False, None, cachename
+    
+#     def check_image(self, img_or_name):
+#         """單張影像讀取與轉換"""
+#         if isinstance(img_or_name, str):
+#             images = cv2.imread(img_or_name, cv2.IMREAD_COLOR)
+#             if images is None:
+#                 raise ValueError(f"Failed to read image: {img_or_name}")
+#         else:
+#             images = img_or_name
+#         images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
+#         return images
+
+
+#     def check_images_batch(self, img_or_names, max_workers=32):
+#         """批次並行讀取影像"""
+#         from concurrent.futures import ThreadPoolExecutor
+        
+#         def load_one(img_or_name):
+#             if isinstance(img_or_name, str):
+#                 img = cv2.imread(img_or_name, cv2.IMREAD_COLOR)
+#                 if img is None:
+#                     raise ValueError(f"Failed to read image: {img_or_name}")
+#                 return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+#             else:
+#                 # 如果已經是 numpy array
+#                 if isinstance(img_or_name, np.ndarray):
+#                     # 假設輸入可能是 BGR，需要轉換
+#                     if len(img_or_name.shape) == 3 and img_or_name.shape[2] == 3:
+#                         return cv2.cvtColor(img_or_name, cv2.COLOR_BGR2RGB)
+#                 return img_or_name
+        
+#         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+#             images = list(executor.map(load_one, img_or_names))
+        
+#         return images
+    
+#     @torch.no_grad()
+#     def detect(self, image, imgname):
+#         flag, cache, cachename = self.check_cache(imgname)
+#         if flag:
+#             return cache
+#         image = self.check_image(imgname)
+#         results = self.model(image) #RGB images[:,:,::-1]
+#         arrays = np.array(results.pandas().xyxy[0])
+#         res = {
+#             'results': arrays,
+#             'image_shape': image.shape,
+#         }
+#         self.dump(cachename, res)
+#         return res
+    
+#     @staticmethod
+#     def select_class(results, name):
+#         select = []
+#         for i, res in enumerate(results['results']):
+#             classname = res[6]
+#             if classname != name:
+#                 continue
+#             box = res[:5]
+#             select.append(box)
+#         select = np.stack(select)
+#         return select, results
+
+
+#     def select_bbox(self, select, results, imgname):
+#         if select.shape[0] == 0:
+#             return select
+#         # Naive: select the best
+#         idx = np.argsort(select[:, -1])[::-1]
+#         return select[idx[0:1]]
+
+#     @torch.no_grad()
+#     def detect_batch(self, images, parallel_load=True):
+#         """批次推論（支援並行讀取）"""
+#         if parallel_load:
+#             input_batch = self.check_images_batch(images)
+#         else:
+#             input_batch = [self.check_image(img) for img in images]
+        
+#         print(f"[YOLOv5] Batch predict {len(input_batch)} images")
+        
+#         results_batch = self.model(input_batch)
+        
+#         pandas_results = results_batch.pandas().xyxy
+        
+#         results = []
+#         for idx in range(len(images)):
+#             arrays = np.array(pandas_results[idx])
+#             res = {
+#                 'results': arrays, 
+#                 'image_shape': input_batch[idx].shape
+#             }
+#             results.append(res)
+        
+#         return results
+
+
+#     def __call__(self, images, imgnames=None):
+#         squeeze = False
+#         if not isinstance(images, list):
+#             images = [images]
+#             squeeze = True
+        
+#         num_images = len(images)
+#         detects = {'bbox': [None] * num_images}
+        
+#         results = self.detect_batch(images, parallel_load=True)
+
+#         for i in range(num_images):
+#             res = results[i]
+#             results_array = res['results']
+            
+#             if len(results_array) == 0:
+#                 detects['bbox'][i] = np.zeros((0, 5), dtype=np.float32)
+#                 continue
+            
+#             class_mask = results_array[:, 6] == self.name
+#             select = results_array[class_mask, :5].astype(np.float32)
+            
+#             if len(select) == 0:
+#                 detects['bbox'][i] = np.zeros((0, 5), dtype=np.float32)
+#             else:
+#                 imgname = imgnames[i] if imgnames is not None else None
+#                 detects['bbox'][i] = self.select_bbox(select, res, imgname)
+        
+#         if squeeze:
+#             detects['bbox'] = detects['bbox'][0]
+        
+#         return detects
 
 
 class BaseYOLOv5rt:

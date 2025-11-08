@@ -65,164 +65,163 @@ class MultiStage:
         self.keys_keep = keys_keep
         self.timer = Timer(at_steps, verbose=timer)
 
-    # def at_step(self, data, index):
-    #     ret = {}
-    #     if 'meta' in data:
-    #         ret['meta'] = data['meta']
-    #     for key in self.keys_keep:
-    #         ret[key] = data[key]
+    def at_step(self, data, index):
+        ret = {}
+        if 'meta' in data:
+            ret['meta'] = data['meta']
+        for key in self.keys_keep:
+            ret[key] = data[key]
 
-    #     timer = {}
-    #     for key, model in self.model_steps.items():
-    #         if self._at_step[key].get('skip', False):
-    #             continue
+        timer = {}
+        for key, model in self.model_steps.items():
+            if self._at_step[key].get('skip', False):
+                continue
 
-    #         inputs = {}
-    #         for k in self._at_step[key].get('key_from_data', []):
-    #             inputs[k] = data[k]
-    #         for k in self._at_step[key].get('key_from_previous', []):
-    #             inputs[k] = ret[k]
+            inputs = {}
+            for k in self._at_step[key].get('key_from_data', []):
+                inputs[k] = data[k]
+            for k in self._at_step[key].get('key_from_previous', []):
+                inputs[k] = ret[k]
 
-    #         # ===== NVTX 範圍開始 =====
-    #         # if key in ['detect', 'keypoints2d']:
-    #         #     torch.cuda.nvtx.range_push(f"{key}_frame{index}")
-    #         # ========================
+            # ===== NVTX 範圍開始 =====
+            torch.cuda.nvtx.range_push(f"{key}_frame{index}")
+            # ========================
             
 
-    #         start = time.time()
-    #         output = model(**inputs)
-    #         timer[key] = time.time() - start
-
-    #         # if key in ['detect', 'keypoints2d']:
-    #         #     torch.cuda.nvtx.range_pop()
-
-    #         if output is not None:
-    #             ret.update(output)
-
-    #     # 更新 Timer
-    #     self.timer.update(timer)
-    #     # 存每個 sample 的耗時
-    #     self.last_step = timer.copy()
-
-    #     return ret
-
-    def at_step(self, batch_data, batch_indices):
-        batch_ret = []   
-        batch_timer = [] 
-
-        detect_key = 'detect'
-        detect_time = 0.0  
-
-        # --- Step 1: detect 批次處理 ---
-        if detect_key in self.model_steps and not self._at_step[detect_key].get('skip', False):
-            all_images, all_imgnames = [], []
-            view_counts = []
-            for data in batch_data:
-                all_images.extend(data['images'])
-                all_imgnames.extend(data['imgnames'])
-                view_counts.append(len(data['images']))
-
-            torch.cuda.nvtx.range_push(f"detect_{batch_indices}_batch")
             start = time.time()
-            batch_detects = self.model_steps[detect_key](all_images, all_imgnames)
-            detect_time = time.time() - start
+            output = model(**inputs)
+            timer[key] = time.time() - start
+
+
             torch.cuda.nvtx.range_pop()
 
-            # 拆回每個樣本
-            start_idx = 0
-            for i, data in enumerate(batch_data):
-                n_views = view_counts[i]
-                ret = {}
-                if 'meta' in data:
-                    ret['meta'] = data['meta']
-                for key in self.keys_keep:
-                    ret[key] = data[key]
-                ret['bbox'] = batch_detects['bbox'][start_idx:start_idx+n_views]
+            if output is not None:
+                ret.update(output)
 
-                batch_ret.append(ret)
-                batch_timer.append({})  # 不再重複加 detect_time
-                start_idx += n_views
-        else:
-            # detect 被 skip
-            for data, index in zip(batch_data, batch_indices):
-                ret = {}
-                if 'meta' in data:
-                    ret['meta'] = data['meta']
-                for key in self.keys_keep:
-                    ret[key] = data[key]
-                batch_ret.append(ret)
-                batch_timer.append({})
+        # 更新 Timer
+        self.timer.update(timer)
+        # 存每個 sample 的耗時
+        self.last_step = timer.copy()
 
-        # --- Step 2: 其他 steps ---
-        for key, model in self.model_steps.items():
-            if key == detect_key or self._at_step[key].get('skip', False):
-                continue
+        return ret
 
-            # 特別處理 keypoints2d: 改為批次模式
-            if key == 'keypoints2d':
-                all_images, all_bboxes, all_imgnames = [], [], []
-                view_counts = []
-                for data, ret in zip(batch_data, batch_ret):
-                    all_images.extend(data['images'])
-                    all_bboxes.extend(ret['bbox'])
-                    all_imgnames.extend(data['imgnames'])
-                    view_counts.append(len(data['images']))
+    # def at_step(self, batch_data, batch_indices):
+    #     batch_ret = []   
+    #     batch_timer = [] 
 
-                start = time.time()
-                torch.cuda.nvtx.range_push(f"keypoints2d_{batch_indices}_batch")
-                batch_keypoints = model(all_bboxes, all_images, all_imgnames)
-                torch.cuda.nvtx.range_pop()
-                total_time = time.time() - start
+    #     detect_key = 'detect'
+    #     detect_time = 0.0  
 
-                start_idx = 0
-                for i, (data, ret) in enumerate(zip(batch_data, batch_ret)):
-                    n_views = view_counts[i]
-                    ret['keypoints'] = batch_keypoints['keypoints'][start_idx:start_idx+n_views]
-                    batch_timer[i][key] = total_time / len(batch_data)
-                    start_idx += n_views
-                continue
+    #     # --- Step 1: detect 批次處理 ---
+    #     if detect_key in self.model_steps and not self._at_step[detect_key].get('skip', False):
+    #         all_images, all_imgnames = [], []
+    #         view_counts = []
+    #         for data in batch_data:
+    #             all_images.extend(data['images'])
+    #             all_imgnames.extend(data['imgnames'])
+    #             view_counts.append(len(data['images']))
 
+    #         torch.cuda.nvtx.range_push(f"detect_{batch_indices}_batch")
+    #         start = time.time()
+    #         batch_detects = self.model_steps[detect_key](all_images, all_imgnames)
+    #         detect_time = time.time() - start
+    #         torch.cuda.nvtx.range_pop()
 
+    #         # 拆回每個樣本
+    #         start_idx = 0
+    #         for i, data in enumerate(batch_data):
+    #             n_views = view_counts[i]
+    #             ret = {}
+    #             if 'meta' in data:
+    #                 ret['meta'] = data['meta']
+    #             for key in self.keys_keep:
+    #                 ret[key] = data[key]
+    #             ret['bbox'] = batch_detects['bbox'][start_idx:start_idx+n_views]
 
-            # --- 其他步驟維持逐樣本處理 ---
-            else:
-                for i, (data, index) in enumerate(zip(batch_data, batch_indices)):
-                    ret = batch_ret[i]
-                    timer = {}
+    #             batch_ret.append(ret)
+    #             batch_timer.append({})  # 不再重複加 detect_time
+    #             start_idx += n_views
+    #     else:
+    #         # detect 被 skip
+    #         for data, index in zip(batch_data, batch_indices):
+    #             ret = {}
+    #             if 'meta' in data:
+    #                 ret['meta'] = data['meta']
+    #             for key in self.keys_keep:
+    #                 ret[key] = data[key]
+    #             batch_ret.append(ret)
+    #             batch_timer.append({})
 
-                    # 準備 inputs
-                    inputs = {}
-                    for k in self._at_step[key].get('key_from_data', []):
-                        inputs[k] = data[k]
-                    for k in self._at_step[key].get('key_from_previous', []):
-                        inputs[k] = ret[k]
+    #     # --- Step 2: 其他 steps ---
+    #     for key, model in self.model_steps.items():
+    #         if key == detect_key or self._at_step[key].get('skip', False):
+    #             continue
 
-                    start = time.time()
-                    torch.cuda.nvtx.range_push(f"{key}_frame{index}")
-                    output = model(**inputs)
-                    torch.cuda.nvtx.range_pop()
-                    timer[key] = time.time() - start
+    #         # 特別處理 keypoints2d: 改為批次模式
+    #         if key == 'keypoints2d':
+    #             all_images, all_bboxes, all_imgnames = [], [], []
+    #             view_counts = []
+    #             for data, ret in zip(batch_data, batch_ret):
+    #                 all_images.extend(data['images'])
+    #                 all_bboxes.extend(ret['bbox'])
+    #                 all_imgnames.extend(data['imgnames'])
+    #                 view_counts.append(len(data['images']))
 
-                    if output is not None:
-                        ret.update(output)
-                    batch_timer[i].update(timer)
+    #             start = time.time()
+    #             torch.cuda.nvtx.range_push(f"keypoints2d_{batch_indices}_batch")
+    #             batch_keypoints = model(all_bboxes, all_images, all_imgnames)
+    #             torch.cuda.nvtx.range_pop()
+    #             total_time = time.time() - start
 
-
-        # === Step 3: 合併批次計時 ===
-        merged_timer = {}
-        for t in batch_timer:
-            for k, v in t.items():
-                merged_timer[k] = merged_timer.get(k, 0.0) + v
-
-
-        if detect_time > 0:
-            merged_timer[detect_key] = merged_timer.get(detect_key, 0.0) + detect_time
+    #             start_idx = 0
+    #             for i, (data, ret) in enumerate(zip(batch_data, batch_ret)):
+    #                 n_views = view_counts[i]
+    #                 ret['keypoints'] = batch_keypoints['keypoints'][start_idx:start_idx+n_views]
+    #                 batch_timer[i][key] = total_time / len(batch_data)
+    #                 start_idx += n_views
+    #             continue
 
 
-        self.last_step = merged_timer.copy()  
-        self.timer.update(merged_timer)       
 
-        return batch_ret
+    #         # --- 其他步驟維持逐樣本處理 ---
+    #         else:
+    #             for i, (data, index) in enumerate(zip(batch_data, batch_indices)):
+    #                 ret = batch_ret[i]
+    #                 timer = {}
+
+    #                 # 準備 inputs
+    #                 inputs = {}
+    #                 for k in self._at_step[key].get('key_from_data', []):
+    #                     inputs[k] = data[k]
+    #                 for k in self._at_step[key].get('key_from_previous', []):
+    #                     inputs[k] = ret[k]
+
+    #                 start = time.time()
+    #                 torch.cuda.nvtx.range_push(f"{key}_frame{index}")
+    #                 output = model(**inputs)
+    #                 torch.cuda.nvtx.range_pop()
+    #                 timer[key] = time.time() - start
+
+    #                 if output is not None:
+    #                     ret.update(output)
+    #                 batch_timer[i].update(timer)
+
+
+    #     # === Step 3: 合併批次計時 ===
+    #     merged_timer = {}
+    #     for t in batch_timer:
+    #         for k, v in t.items():
+    #             merged_timer[k] = merged_timer.get(k, 0.0) + v
+
+
+    #     if detect_time > 0:
+    #         merged_timer[detect_key] = merged_timer.get(detect_key, 0.0) + detect_time
+
+
+    #     self.last_step = merged_timer.copy()  
+    #     self.timer.update(merged_timer)       
+
+    #     return batch_ret
 
 
     

@@ -262,8 +262,8 @@ def main_entrypoint():
     elapsed_time1 = time.time() - start_time1
 
     
-    # process(dataset, model, args)
-    process_batched(dataset, model, args)
+    process(dataset, model, args)
+    # process_batched(dataset, model, args)
     end_time = time.time()
     elapsed = end_time - start_time
     print(f"Configuration & initialization time: {elapsed_time1:.2f} seconds")

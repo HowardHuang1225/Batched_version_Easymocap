@@ -218,7 +218,7 @@ class LBFGS(Optimizer):
                  max_eval=None,
                  tolerance_grad=1e-5,
                  tolerance_change=1e-9,
-                 history_size=10,
+                 history_size=100,
                  line_search_fn=None):
         if max_eval is None:
             max_eval = max_iter * 5 // 4
