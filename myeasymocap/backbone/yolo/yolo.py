@@ -6,10 +6,8 @@ from os.path import join
 import pickle
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
-
-# import tensorrt as trt
-# import pycuda.driver as cuda
-# import pycuda.autoinit
+import torchvision
+import tensorrt as trt
 
 def check_modelpath(paths):
     if isinstance(paths, str):
@@ -603,183 +601,225 @@ class BaseYOLOv5:
 
 
 class BaseYOLOv5rt:
-    def __init__(self, engine_path='yolov5m.engine', name='person', multiview=True,
-                 conf_thres=0.3, iou_thres=0.45, input_size=640, device='cuda:0'):
-        import torch, tensorrt as trt
-        import pycuda.driver as cuda
-        import pycuda.autoinit
-        self.device = device
-        self.engine_path = engine_path
+    def __init__(self, ckpt=None, model='yolov5m', name='person',
+                 conf_threshold=0.25, nms_threshold=0.45, input_size=640,
+                 multiview=True, engine_path=None, max_batch_size=128):
+        self.max_batch_size = max_batch_size
         self.name = name
+        self.conf_threshold = conf_threshold
+        self.nms_threshold = nms_threshold
+        self.input_size = input_size
         self.multiview = multiview
         self.output = 'output'
-        self.conf_thres = conf_thres
-        self.iou_thres = iou_thres
-        self.input_size = input_size
-        self.class_id = 0  # person in COCO
-        self.torch = torch
-        self.cuda = cuda
+        self.PERSON_CLASS_ID = 0
 
-        # load TensorRT engine
+        if engine_path is None:
+            engine_path = ckpt.replace('.pt', '.engine') if ckpt else f'{model}.engine'
+        self.engine_path = engine_path
+
+        self._init_tensorrt()
+        self._warmup()
+
+        print(f'[{self.__class__.__name__}] Loaded TensorRT engine: {self.engine_path}')
+        print(f'[{self.__class__.__name__}] Target class: person (id=0)')
+        print(f'[{self.__class__.__name__}] Max batch size: {self.max_batch_size}')
+
+    def _init_tensorrt(self):
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-        with open(self.engine_path, 'rb') as f, trt.Runtime(TRT_LOGGER) as runtime:
-            self.engine = runtime.deserialize_cuda_engine(f.read())
+        runtime = trt.Runtime(TRT_LOGGER)
+        with open(self.engine_path, "rb") as f:
+            engine_data = f.read()
+        self.engine = runtime.deserialize_cuda_engine(engine_data)
         self.context = self.engine.create_execution_context()
 
-        # allocate GPU buffers
-        self.max_batch = 8  
-        self.output_shape = (self.max_batch, 25200, 85)  # YOLOv5m 640x640
-        self.d_input = cuda.mem_alloc(1 * 3 * self.input_size * self.input_size * 4 * self.max_batch)
-        self.d_output = cuda.mem_alloc(np.empty(self.output_shape, dtype=np.float32).nbytes)
-        self.bindings = [int(self.d_input), int(self.d_output)]
-        self.stream = cuda.Stream()
+        self.input_name, self.output_name = None, None
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            mode = self.engine.get_tensor_mode(name)
+            if mode == trt.TensorIOMode.INPUT:
+                self.input_name = name
+            else:
+                self.output_name = name
 
-    # ---------------- Cache ----------------
+        if self.input_name is None or self.output_name is None:
+            raise RuntimeError("Failed to find input/output tensor names")
+        print(f"Input tensor: {self.input_name}, Output tensor: {self.output_name}")
+
+    def _warmup(self):
+        print("[YOLOv5-TRT] Warming up...")
+        dummy_input = np.random.rand(self.max_batch_size, 3, self.input_size, self.input_size).astype(np.float32)
+        self.gpu_input = torch.from_numpy(dummy_input).cuda()
+        for _ in range(3):
+            self._infer_single_batch(dummy_input[:1])
+        torch.cuda.synchronize()
+        print("[YOLOv5-TRT] Warmup complete")
+
     def dump(self, cachename, output):
-        import os, pickle
         os.makedirs(os.path.dirname(cachename), exist_ok=True)
         with open(cachename, 'wb') as f:
             pickle.dump(output, f)
         return output
 
     def load(self, cachename):
-        import pickle
         with open(cachename, 'rb') as f:
             return pickle.load(f)
 
     def check_cache(self, imgname):
-        import os
         basename = os.path.basename(imgname)
-        imgext = '.' + basename.split('.')[-1] if '.' in basename else ''
-        nv = os.path.basename(os.path.dirname(imgname)) or 'root'
-        cachename = os.path.join(self.output, self.name, nv, basename.replace(imgext, '.npy'))
+        imgext = '.' + basename.split('.')[-1]
+        nv = imgname.split(os.sep)[-2]
+        cachename = join(self.output, self.name, nv, basename.replace(imgext, '.npy'))
+        os.makedirs(os.path.dirname(cachename), exist_ok=True)
         if os.path.exists(cachename):
             return True, self.load(cachename), cachename
         return False, None, cachename
 
     def check_image(self, img_or_name):
-        import cv2
         if isinstance(img_or_name, str):
             img = cv2.imread(img_or_name)
             if img is None:
-                raise FileNotFoundError(f"Image not found: {img_or_name}")
+                raise ValueError(f"Failed to read image: {img_or_name}")
         else:
             img = img_or_name
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return img
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # ---------------- Batch TensorRT inference ----------------
-    def detect_batch(self, images):
-        import numpy as np
-        images_proc = []
-        orig_shapes = []
+    def check_images_batch(self, img_or_names, max_workers=32):
+        def load_one(img_or_name):
+            if isinstance(img_or_name, str):
+                img = cv2.imread(img_or_name)
+                if img is None:
+                    raise ValueError(f"Failed to read image: {img_or_name}")
+                return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            elif isinstance(img_or_name, np.ndarray) and img_or_name.shape[2] == 3:
+                return cv2.cvtColor(img_or_name, cv2.COLOR_BGR2RGB)
+            return img_or_name
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            images = list(executor.map(load_one, img_or_names))
+        return images
+
+    def preprocess(self, images):
+        batch, original_shapes = [], []
         for img in images:
-            orig_shapes.append(img.shape)
-            img_resized = cv2.resize(img, (self.input_size, self.input_size))
-            img_input = img_resized.transpose(2,0,1).astype(np.float32)/255.0
-            images_proc.append(img_input)
-        input_batch = np.stack(images_proc, axis=0)
-        batch_size = len(images)
-        input_batch = np.ascontiguousarray(input_batch)
-        output = np.empty((batch_size, 25200, 85), dtype=np.float32)
+            original_shapes.append(img.shape)
+            img_resized = cv2.resize(img, (self.input_size, self.input_size), interpolation=cv2.INTER_LINEAR)
+            batch.append(img_resized.transpose(2, 0, 1).astype(np.float32) / 255.0)
+        return np.ascontiguousarray(np.stack(batch, axis=0)), original_shapes
 
-        self.cuda.memcpy_htod_async(self.d_input, input_batch, self.stream)
-        self.context.execute_async_v2(self.bindings, stream_handle=self.stream.handle)
-        self.cuda.memcpy_dtoh_async(output, self.d_output, self.stream)
-        self.stream.synchronize()
+    @torch.no_grad()
+    def infer_tensorrt(self, input_batch):
+        total = input_batch.shape[0]
+        if total > self.max_batch_size:
+            outputs = []
+            for start in range(0, total, self.max_batch_size):
+                end = min(start + self.max_batch_size, total)
+                outputs.append(self._infer_single_batch(input_batch[start:end]))
+            return torch.cat(outputs, dim=0)
+        return self._infer_single_batch(input_batch)
 
-        return output, orig_shapes
+    def _infer_single_batch(self, input_batch):
+        batch_size = input_batch.shape[0]
+        input_tensor = torch.from_numpy(input_batch).cuda(non_blocking=True)
+        self.context.set_input_shape(self.input_name, input_tensor.shape)
 
-    # ---------------- GPU NMS ----------------
-    def postprocess(self, output, orig_shapes):
-        import torch
-        boxes_all = []
-        for i, pred in enumerate(output):
-            pred = torch.tensor(pred).to(self.device)
-            if pred.numel() == 0:
-                boxes_all.append(torch.zeros((0,6), device=self.device))
+        output_shape = list(self.context.get_tensor_shape(self.output_name))
+        for i, dim in enumerate(output_shape):
+            if dim == -1 and i == 0:
+                output_shape[i] = batch_size
+        output_tensor = torch.empty(tuple(output_shape), dtype=torch.float32, device='cuda')
+
+        self.context.set_tensor_address(self.input_name, input_tensor.data_ptr())
+        self.context.set_tensor_address(self.output_name, output_tensor.data_ptr())
+
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            success = self.context.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
+        if not success:
+            raise RuntimeError("TensorRT inference failed")
+        return output_tensor
+
+    def postprocess_gpu(self, predictions_gpu, original_shapes):
+        results = []
+        for i in range(predictions_gpu.shape[0]):
+            pred = predictions_gpu[i]
+            orig_h, orig_w = original_shapes[i][:2]
+
+            obj_conf = pred[:, 4]
+            mask = obj_conf > self.conf_threshold
+            filtered = pred[mask]
+
+            if len(filtered) == 0:
+                results.append(np.zeros((0, 5), dtype=np.float32))
                 continue
-            # conf * class score
-            scores, labels = torch.max(pred[:,5:], dim=1)
-            conf = pred[:,4] * scores
-            mask = (conf > self.conf_thres) & (labels == self.class_id)
 
-            pred = pred[mask]          # shape: [N, 85]
-            conf = conf[mask]           # shape: [N]
-            labels = labels[mask]       # shape: [N]
+            class_scores = filtered[:, 5:]
+            class_ids = torch.argmax(class_scores, dim=1)
+            class_confs = torch.max(class_scores, dim=1)[0]
 
-            if pred.shape[0] == 0:
-                boxes_all.append(torch.zeros((0,6), device=self.device))
+            person_mask = class_ids == self.PERSON_CLASS_ID
+            person_dets = filtered[person_mask]
+            person_class_confs = class_confs[person_mask]
+
+            if len(person_dets) == 0:
+                results.append(np.zeros((0, 5), dtype=np.float32))
                 continue
 
-            x, y, w, h = pred[:,0], pred[:,1], pred[:,2], pred[:,3]
-            x1 = (x-w/2) * orig_shapes[i][1] / self.input_size
-            y1 = (y-h/2) * orig_shapes[i][0] / self.input_size
-            x2 = (x+w/2) * orig_shapes[i][1] / self.input_size
-            y2 = (y+h/2) * orig_shapes[i][0] / self.input_size
-            out_boxes = torch.stack([x1, y1, x2, y2, conf, labels], dim=1)
+            final_confs = person_dets[:, 4] * person_class_confs
+            conf_mask = final_confs > self.conf_threshold
+            person_dets = person_dets[conf_mask]
+            final_confs = final_confs[conf_mask]
 
-            keep = torch.ops.torchvision.nms(out_boxes[:,:4], out_boxes[:,4], self.iou_thres)
-            boxes_all.append(out_boxes[keep])
-        return boxes_all
+            if len(person_dets) == 0:
+                results.append(np.zeros((0, 5), dtype=np.float32))
+                continue
 
-    # ---------------- Callable ----------------
-    def detect(self, image, imgname):
-        flag, cache, cachename = self.check_cache(imgname)
-        if flag:
-            return cache
-        image = self.check_image(image)
-        output, shapes = self.detect_batch([image])
-        boxes = self.postprocess(output, shapes)
-        res = {'results': boxes[0].cpu().numpy(), 'image_shape': shapes[0]}
-        self.dump(cachename, res)
-        return res
+            x, y, w, h = person_dets[:, 0], person_dets[:, 1], person_dets[:, 2], person_dets[:, 3]
+            boxes = torch.stack([x - w / 2, y - h / 2, x + w / 2, y + h / 2], dim=1)
 
-    def __call__(self, images, imgnames, top_k=None):
-        squeeze=False
-        if not isinstance(images,list):
-            images=[images]
-            imgnames=[imgnames]
-            squeeze=True
-
-        detects={'bbox':[[] for _ in range(len(images))]}
-        batch_imgs, cache_flags, cache_results, cache_names = [],[],[],[]
-
-        # Step1: check cache
-        for img,name in zip(images,imgnames):
-            flag, cache, cachename = self.check_cache(name)
-            cache_flags.append(flag)
-            cache_results.append(cache)
-            cache_names.append(cachename)
-            batch_imgs.append(self.check_image(img) if not flag else None)
-
-        # Step2: batch inference for all uncached images
-        need_idx = [i for i,f in enumerate(cache_flags) if not f]
-        if len(need_idx)>0:
-            input_batch = [batch_imgs[i] for i in need_idx]
-            output, shapes = self.detect_batch(input_batch)
-            boxes_list = self.postprocess(output, shapes)
-            for idx, i in enumerate(need_idx):
-                boxes = boxes_list[idx].cpu().numpy()
-                res = {'results': boxes, 'image_shape': shapes[idx]}
-                self.dump(cache_names[i], res)
-                cache_results[i] = res
-
-        # Step3: postprocess + top_k
-        for i, res in enumerate(cache_results):
-            select,_ = res['results'], res
-            if len(select)==0:
-                select=np.zeros((0,5),dtype=np.float32)
+            keep = torchvision.ops.nms(boxes, final_confs, self.nms_threshold)
+            if len(keep) > 0:
+                final_boxes = boxes[keep]
+                final_scores = final_confs[keep].unsqueeze(1)
+                final_boxes[:, [0, 2]] *= orig_w / self.input_size
+                final_boxes[:, [1, 3]] *= orig_h / self.input_size
+                results.append(torch.cat([final_boxes, final_scores], dim=1).cpu().numpy().astype(np.float32))
             else:
-                select=np.array(select).astype(np.float32)
-                if top_k is not None:
-                    idx = np.argsort(select[:,4])[::-1]
-                    select = select[idx[:top_k]]
-            detects['bbox'][i]=select
+                results.append(np.zeros((0, 5), dtype=np.float32))
+        return results
+
+    def select_bbox(self, select, results, imgname=None):
+        if select.shape[0] == 0:
+            return select
+        idx = np.argsort(select[:, -1])[::-1]
+        return select[idx[:1]]
+
+    @torch.no_grad()
+    def detect_batch(self, images, parallel_load=True):
+        input_images = self.check_images_batch(images) if parallel_load else [self.check_image(img) for img in images]
+        input_batch, original_shapes = self.preprocess(input_images)
+        predictions_gpu = self.infer_tensorrt(input_batch)
+        bboxes = self.postprocess_gpu(predictions_gpu, original_shapes)
+        results = [{'results': bboxes[i], 'image_shape': original_shapes[i]} for i in range(len(images))]
+        return results
+
+    def __call__(self, images, imgnames=None):
+        squeeze = False
+        if not isinstance(images, list):
+            images = [images]
+            squeeze = True
+
+        results_detect = {'bbox': [None] * len(images)}
+        batch_results = self.detect_batch(images)
+
+        for i, res in enumerate(batch_results):
+            results_array = res['results']
+            imgname = imgnames[i] if imgnames is not None else None
+            results_detect['bbox'][i] = self.select_bbox(results_array, res, imgname)
 
         if squeeze:
-            detects['bbox']=detects['bbox'][0]
-        return detects
+            results_detect['bbox'] = results_detect['bbox'][0]
+        return results_detect
 
 
 

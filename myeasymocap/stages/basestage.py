@@ -11,9 +11,12 @@ import time
 # import nvtx
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 import torch.multiprocessing as mp
-# import multiprocessing as mp
 import os
 from math import floor
+from queue import Queue
+import math
+from multiprocessing import Pool
+from functools import partial
 
 class Timer:
     def __init__(self, record, verbose) -> None:
@@ -295,6 +298,8 @@ class MultiStage:
 
                 start = time.time()
                 torch.cuda.nvtx.range_push(f"{key}_final")
+                if key == 'fitting_each_person':
+                    mp.set_start_method('spawn', force=True)
                 output = model(**inputs)
                 torch.cuda.nvtx.range_pop()
                 elapsed = time.time() - start
@@ -358,7 +363,6 @@ class StageForFittingEach:
         self.stages_args = stages
         self.keys_keep = keys_keep
 
-        # 初始化 timer
         self.timer = Timer(record={k: 0. for k in self.stages.keys()},
                            verbose=verbose)
 
@@ -396,21 +400,20 @@ class StageForFittingEach:
                 end = time.time()
                 timer_record[key] = end - start
 
-
-            # 輸出計時結果
             self.timer.update(timer_record)
 
             for key in self.keys_keep:
                 result[key] = ret0[key]
 
         return {'results': results}
+    
 
 class StageForFittingEach_MT:
-    def __init__(self, stages, keys_keep, verbose=True) -> None:
+    def __init__(self, stages, keys_keep, verbose=True, max_workers=None) -> None:
         stages_ = {}
         for key, val in stages.items():
             if val['module'] == 'skip':
-                mywarn('Stage {} is not used'.format(key))
+                mywarn(f'Stage {key} is not used')
                 continue
             model = load_object(val['module'], val['args'])
             stages_[key] = model
@@ -418,52 +421,53 @@ class StageForFittingEach_MT:
         self.stages_args = stages
         self.keys_keep = keys_keep
 
-        # 初始化 timer
         self.timer = Timer(record={k: 0. for k in self.stages.keys()},
                            verbose=verbose)
 
-    def __call__(self, results, **ret):
+        # 限制最大同時執行人物數，避免 GPU context thrashing
+        self.max_workers = max_workers or min(4, mp.cpu_count() // 2)
 
+    def __call__(self, results, **ret):
         results_items = list(results.items())
         timer_records = {}
 
-        # 定義單個人物處理函數
         def process_one_person(pid_result_tuple):
             pid, result = pid_result_tuple
             print(f'[{self.__class__.__name__}] Optimize person {pid} with {len(result["frames"])} frames')
 
-            ret0 = {}
-            ret0.update(ret)
+            # 每個人物使用獨立 CUDA stream
+            stream = torch.cuda.Stream()
+            ret0 = dict(ret)
             timer_record = {}
 
-            for key, stage in self.stages.items():
-                start = time.time()
-                # ===== NVTX 範圍開始 =====
-                torch.cuda.nvtx.range_push(f"{key}_pid{pid}")
-                # ========================
-                for iter_ in range(self.stages_args[key].get('repeat', 1)):
-                    inputs = {}
-                    stage.iter = iter_
-                    for k in self.stages_args[key].get('key_from_data', []):
-                        inputs[k] = result[k]
-                    for k in self.stages_args[key].get('key_from_previous', []):
-                        inputs[k] = ret0[k]
+            # 在 stream 上運行 GPU 任務
+            with torch.cuda.stream(stream):
+                for key, stage in self.stages.items():
+                    start = time.time()
+                    torch.cuda.nvtx.range_push(f"{key}_pid{pid}")
 
-                    output = stage(**inputs)
-                    if output is not None:
-                        ret0.update(output)
-                torch.cuda.nvtx.range_pop()
-                # ===== NVTX 範圍結束 =====
-                end = time.time()
-                timer_record[key] = end - start
+                    for iter_ in range(self.stages_args[key].get('repeat', 1)):
+                        inputs = {}
+                        stage.iter = iter_
+                        for k in self.stages_args[key].get('key_from_data', []):
+                            inputs[k] = result[k]
+                        for k in self.stages_args[key].get('key_from_previous', []):
+                            inputs[k] = ret0[k]
 
-            # 更新結果
+                        output = stage(**inputs)
+                        if output is not None:
+                            ret0.update(output)
+
+                    torch.cuda.nvtx.range_pop()
+                    timer_record[key] = time.time() - start
+
             for key in self.keys_keep:
                 result[key] = ret0[key]
 
             return pid, timer_record, result
 
-        with ThreadPoolExecutor(max_workers=len(results_items)) as executor:
+
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(results_items))) as executor:
             futures = [executor.submit(process_one_person, item) for item in results_items]
 
             for future in as_completed(futures):
@@ -471,234 +475,200 @@ class StageForFittingEach_MT:
                 timer_records[pid] = timer_record
                 results[pid] = result
 
-        # 更新總計時器
+        # 所有 stream 都提交完後再同步 GPU
+        torch.cuda.synchronize()
+
         for pid, timer_record in timer_records.items():
             self.timer.update(timer_record)
 
         return {'results': results}
 
-# class StageForFittingEach_Hogwild:
-#     def __init__(self, stages, keys_keep, verbose=True):
+# class StageForFittingEach_MT:
+#     def __init__(self, stages, keys_keep, verbose=True) -> None:
 #         stages_ = {}
 #         for key, val in stages.items():
 #             if val['module'] == 'skip':
-#                 mywarn(f'Stage {key} is not used')
+#                 mywarn('Stage {} is not used'.format(key))
 #                 continue
 #             model = load_object(val['module'], val['args'])
 #             stages_[key] = model
 #         self.stages = stages_
 #         self.stages_args = stages
 #         self.keys_keep = keys_keep
-#         self.timer = Timer(record={k: 0. for k in self.stages.keys()}, verbose=verbose)
 
-#     # 這個 method 可以被 spawn pickle
-#     def process_one_person(self, pid_result_tuple, ret_dict, timer_dict, ret, shared_params_dict):
-#         pid, result = pid_result_tuple
-
-#         # ⚠ spawn 啟動，初始化 CUDA
-#         if torch.cuda.is_available():
-#             torch.cuda.init()
-
-#         print(f'[{self.__class__.__name__}] Optimize person {pid} with {len(result["frames"])} frames')
-
-#         # 使用共享參數 tensor
-#         ret0 = {}
-#         ret0.update(ret)
-#         timer_record = {}
-
-#         # 把每個 params 放入 shared tensor
-#         for key, param in result.get("params", {}).items():
-#             if key not in shared_params_dict:
-#                 t = torch.tensor(param, dtype=torch.float32, device="cuda", requires_grad=True)
-#                 t.share_memory_()  # CPU shared memory 也可以，Hogwild 就能操作
-#                 shared_params_dict[key] = t
-
-#         for key, stage in self.stages.items():
-#             start = time.time()
-#             torch.cuda.nvtx.range_push(f"{key}_pid{pid}")
-
-#             for iter_ in range(self.stages_args[key].get('repeat', 1)):
-#                 inputs = {}
-#                 stage.iter = iter_
-#                 # key_from_data 取自 result
-#                 for k in self.stages_args[key].get('key_from_data', []):
-#                     if k == "params":
-#                         inputs[k] = shared_params_dict
-#                     else:
-#                         inputs[k] = result.get(k)
-#                 for k in self.stages_args[key].get('key_from_previous', []):
-#                     inputs[k] = ret0.get(k)
-
-#                 output = stage(**inputs)
-#                 if output is not None:
-#                     ret0.update(output)
-
-#             torch.cuda.nvtx.range_pop()
-#             end = time.time()
-#             timer_record[key] = end - start
-
-#         # 更新 keys_keep
-#         for key in self.keys_keep:
-#             result[key] = ret0.get(key, None)
-
-#         ret_dict[pid] = result
-#         timer_dict[pid] = timer_record
+#         # 初始化 timer
+#         self.timer = Timer(record={k: 0. for k in self.stages.keys()},
+#                            verbose=verbose)
 
 #     def __call__(self, results, **ret):
+
 #         results_items = list(results.items())
 #         timer_records = {}
 
-#         mp.set_start_method("spawn", force=True)
+#         # 定義單個人物處理函數
+#         def process_one_person(pid_result_tuple):
+#             pid, result = pid_result_tuple
+#             print(f'[{self.__class__.__name__}] Optimize person {pid} with {len(result["frames"])} frames')
 
-#         with mp.Manager() as manager:
-#             ret_dict = manager.dict()
-#             timer_dict = manager.dict()
-#             shared_params_dict = manager.dict()  # 多 process 共用 tensor
+#             ret0 = {}
+#             ret0.update(ret)
+#             timer_record = {}
 
-#             processes = []
-#             for item in results_items:
-#                 p = mp.Process(
-#                     target=self.process_one_person,
-#                     args=(item, ret_dict, timer_dict, ret, shared_params_dict)
-#                 )
-#                 p.start()
-#                 processes.append(p)
+#             for key, stage in self.stages.items():
+#                 start = time.time()
+#                 # ===== NVTX 範圍開始 =====
+#                 torch.cuda.nvtx.range_push(f"{key}_pid{pid}")
+#                 # ========================
+#                 for iter_ in range(self.stages_args[key].get('repeat', 1)):
+#                     inputs = {}
+#                     stage.iter = iter_
+#                     for k in self.stages_args[key].get('key_from_data', []):
+#                         inputs[k] = result[k]
+#                     for k in self.stages_args[key].get('key_from_previous', []):
+#                         inputs[k] = ret0[k]
 
-#             for p in processes:
-#                 p.join()
+#                     output = stage(**inputs)
+#                     if output is not None:
+#                         ret0.update(output)
+#                 torch.cuda.nvtx.range_pop()
+#                 # ===== NVTX 範圍結束 =====
+#                 end = time.time()
+#                 timer_record[key] = end - start
 
-#             # 將結果回寫
-#             for pid in ret_dict.keys():
-#                 results[pid] = ret_dict[pid]
-#                 timer_records[pid] = timer_dict[pid]
+#             # 更新結果
+#             for key in self.keys_keep:
+#                 result[key] = ret0[key]
 
+#             return pid, timer_record, result
+
+#         with ThreadPoolExecutor(max_workers=len(results_items)) as executor:
+#             futures = [executor.submit(process_one_person, item) for item in results_items]
+
+#             for future in as_completed(futures):
+#                 pid, timer_record, result = future.result()
+#                 timer_records[pid] = timer_record
+#                 results[pid] = result
+
+#         # 更新總計時器
 #         for pid, timer_record in timer_records.items():
 #             self.timer.update(timer_record)
 
 #         return {'results': results}
+
+
+# =============================
+# initializer for worker processes
+# =============================
+_global_stages = None
+_global_stages_args = None
+_global_keys_keep = None
+
+def _init_worker(stages_args, keys_keep):
+    """子process初始化時預先載入模型"""
+    global _global_stages, _global_stages_args, _global_keys_keep
+    torch.cuda.init()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _global_stages_args = stages_args
+    _global_keys_keep = keys_keep
+    _global_stages = {}
+    for key, val in stages_args.items():
+        if val["module"] != "skip":
+            model = load_object(val["module"], val["args"])
+            if hasattr(model, "to") and callable(model.to):
+                model.to(device)
+            _global_stages[key] = model
+    # print(f"[Worker {os.getpid()}] Initialized with {len(_global_stages)} stages on {device}")
+
+
+# =============================
+# Worker function
+# =============================
+def _process_one_person_worker(pid_result_tuple, ret):
+    pid, result = pid_result_tuple
+    global _global_stages, _global_stages_args, _global_keys_keep
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # print(f"[Worker {os.getpid()}] Optimize person {pid} with {len(result['frames'])} frames")
+
+    ret0 = dict(ret)
+    timer_record = {}
+
+    for key, stage in _global_stages.items():
+        start = time.time()
+        for iter_ in range(_global_stages_args[key].get("repeat", 1)):
+            inputs = {}
+            stage.iter = iter_
+
+            for k in _global_stages_args[key].get("key_from_data", []):
+                v = result[k]
+                if isinstance(v, torch.Tensor):
+                    v = v.pin_memory().to(device, non_blocking=True)
+                inputs[k] = v
+
+            for k in _global_stages_args[key].get("key_from_previous", []):
+                v = ret0[k]
+                if isinstance(v, torch.Tensor):
+                    v = v.pin_memory().to(device, non_blocking=True)
+                inputs[k] = v
+
+            with torch.amp.autocast(device_type='cuda'):
+                output = stage(**inputs)
+
+            if output is not None:
+                ret0.update(output)
+
+        torch.cuda.synchronize()
+        timer_record[key] = time.time() - start
+
+    for key in _global_keys_keep:
+        result[key] = ret0[key]
+
+    return pid, timer_record, result
+
+
+# =============================
+# main part
+# =============================
 class StageForFittingEach_MP:
-    def __init__(self, stages, keys_keep, num_processes=None, verbose=True) -> None:
-        stages_ = {}
-        for key, val in stages.items():
-            if val['module'] == 'skip':
-                print(f'Stage {key} is not used')
-                continue
-            model = load_object(val['module'], val['args'])
-            stages_[key] = model
-        
-        self.stages = stages_
+    def __init__(self, stages, keys_keep, verbose=True, num_workers=None):
         self.stages_args = stages
         self.keys_keep = keys_keep
         self.verbose = verbose
 
-        if num_processes is None:
-            self.num_processes = min(mp.cpu_count(), 4)  # 預設最多4個進程
-        else:
-            self.num_processes = num_processes
+        if num_workers is None:
+            num_workers = max(1, mp.cpu_count() // 2)
+        self.num_workers = num_workers
 
-        self.num_threads_per_process = floor(mp.cpu_count() / self.num_processes)
+        self.timer = Timer(record={k: 0. for k in stages.keys()},
+                           verbose=verbose)
 
-        self.timer = Timer(record={k: 0. for k in self.stages.keys()},
-                          verbose=verbose)
+        # 初始化 persistent pool
+        mp.set_start_method("spawn", force=True)
+        self.pool = Pool(processes=self.num_workers,
+                         initializer=_init_worker,
+                         initargs=(self.stages_args, self.keys_keep))
 
-    @staticmethod
-    def fit_single_person(pid, result, stages, stages_args, keys_keep, num_threads, shared_ret, device_id=None):
-
-        torch.set_num_threads(num_threads)
-
-        if device_id is not None and torch.cuda.is_available():
-            torch.cuda.set_device(device_id)
-        
-        print(f'[Process-{os.getpid()}] Optimize person {pid} with {len(result["frames"])} frames')
-        
-        ret0 = {}
-        ret0.update(shared_ret)
-        
-        timer_record = {}
-        
-        for key, stage in stages.items():
-            start = time.time()
-            
-            
-            torch.cuda.nvtx.range_push(f"{key}_pid{pid}")
-            
-            for iter_ in range(stages_args[key].get('repeat', 1)):
-                inputs = {}
-                stage.iter = iter_
-                
-                for k in stages_args[key].get('key_from_data', []):
-                    inputs[k] = result[k]
-                
-                for k in stages_args[key].get('key_from_previous', []):
-                    inputs[k] = ret0[k]
-                
-                output = stage(**inputs)
-                if output is not None:
-                    ret0.update(output)
-            
-            if torch.cuda.is_available():
-                torch.cuda.nvtx.range_pop()
-            
-            end = time.time()
-            timer_record[key] = end - start
-        
-        result_output = {key: ret0[key] for key in keys_keep}
-        
-        return pid, result_output, timer_record
+        print(f"[StageForFittingEach_MP_Persistent] Pool created with {self.num_workers} workers")
 
     def __call__(self, results, **ret):
-        pids = list(results.keys())
-        num_people = len(pids)
-        
-        if num_people == 0:
-            return {'results': results}
-        
-        actual_num_processes = min(self.num_processes, num_people)
-        
-        # print(f'[{self.__class__.__name__}] Processing {num_people} people with {actual_num_processes} processes')
-        # print(f'[{self.__class__.__name__}] Each process uses {self.num_threads_per_process} threads')
-        
-        shared_ret = {k: v for k, v in ret.items()}
-        
-  
-        mp_context = mp.get_context('spawn')
-        
+        results_items = list(results.items())
+        timer_records = {}
 
-        with mp_context.Pool(processes=actual_num_processes) as pool:
-            tasks = []
-            for pid in pids:
-                task = pool.apply_async(
-                    self.fit_single_person,
-                    args=(
-                        pid,
-                        results[pid],
-                        self.stages,
-                        self.stages_args,
-                        self.keys_keep,
-                        self.num_threads_per_process,
-                        shared_ret,
-                        None  
-                    )
-                )
-                tasks.append(task)
-            
-            all_timer_records = {k: [] for k in self.stages.keys()}
-            
-            for task in tasks:
-                pid, result_output, timer_record = task.get()
+        # 平行處理
+        worker_func = partial(_process_one_person_worker, ret=ret)
+        outputs = self.pool.map(worker_func, results_items)
 
-                results[pid].update(result_output)
-                
-                for key, duration in timer_record.items():
-                    all_timer_records[key].append(duration)
-        
-        avg_timer_record = {
-            k: sum(v) / len(v) if v else 0.0 
-            for k, v in all_timer_records.items()
-        }
-        self.timer.update(avg_timer_record)
-        
-        if self.verbose:
-            print(f'[{self.__class__.__name__}] All {num_people} people processed')
-        
+        for pid, timer_record, result in outputs:
+            timer_records[pid] = timer_record
+            results[pid] = result
+
+        for pid, timer_record in timer_records.items():
+            self.timer.update(timer_record)
+
         return {'results': results}
+
+    def close(self):
+        """釋放 pool"""
+        print("[StageForFittingEach_MP_Persistent] Closing pool...")
+        self.pool.close()
+        self.pool.join()
