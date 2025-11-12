@@ -388,14 +388,13 @@ class LBFGS(Optimizer):
                     state['al'] = [None] * history_size
                 al = state['al']
 
-                # iteration in L-BFGS loop collapsed to use just one buffer
                 # torch.cuda.nvtx.range_push(f"LBFGS_two_loop_iter{n_iter}")
+                # iteration in L-BFGS loop collapsed to use just one buffer
                 q = flat_grad.neg()
                 for i in range(num_old - 1, -1, -1):
                     al[i] = old_stps[i].dot(q) * ro[i]
                     # q.add_(-al[i], old_dirs[i])
                     q.add_(old_dirs[i], alpha=-al[i])
-
 
                 # multiply by initial Hessian
                 # r/d is the final direction

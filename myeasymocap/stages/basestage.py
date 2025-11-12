@@ -630,7 +630,7 @@ def _process_one_person_worker(pid_result_tuple, ret):
 # main part
 # =============================
 class StageForFittingEach_MP:
-    def __init__(self, stages, keys_keep, verbose=True, num_workers=None):
+    def __init__(self, stages, keys_keep, verbose=True, num_workers=4):
         self.stages_args = stages
         self.keys_keep = keys_keep
         self.verbose = verbose

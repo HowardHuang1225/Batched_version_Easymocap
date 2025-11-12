@@ -99,7 +99,7 @@ args:
         regressor_path: models/J_regressor_body25.npy
     #   # 这个模块返回两个内容：body_model, model; 其中的body_model是用来进行可视化的
     fitting_each_person:
-      module: myeasymocap.stages.basestage.StageForFittingEach
+      module: myeasymocap.stages.basestage.StageForFittingEach_MP
       # skip: True
       key_from_previous: [model, results]
       key_from_data: []
