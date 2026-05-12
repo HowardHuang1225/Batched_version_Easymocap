@@ -119,20 +119,24 @@ class Keypoints3D(BaseKeypoints):
         return loss
 
 class LimbLength(BaseKeypoints):
-    def __init__(self, kintree, key='keypoints3d', **kwargs):
+    def __init__(self, kintree,target_kintree = None, key='keypoints3d', **kwargs):
         self.kintree = np.array(kintree)
+        if(target_kintree is not None):
+            self.target_kintree = np.array(target_kintree)
+        else :
+            self.target_kintree = self.kintree
         super().__init__(**kwargs)
     
     def __str__(self):
-        return "Limb of: {}".format(','.join(['[{},{}]'.format(i,j) for (i,j) in self.kintree]))
+        return "Limb of: {}".format(','.join(['[{},{}]'.format(i,j) for (i,j) in self.kintree]))+ "Target limb of: {}".format(','.join(['[{},{}]'.format(i,j) for (i,j) in self.target_kintree]))
 
     def forward(self, pred, target):
         pred_kpts3d = pred['keypoints']
         target_kpts3d = target['keypoints3d']
         # 用kin tree来进行选择
         pred = torch.norm(pred_kpts3d[..., self.kintree[:, 1], :] - pred_kpts3d[..., self.kintree[:, 0], :], dim=-1, keepdim=True)
-        target = torch.norm(target_kpts3d[..., self.kintree[:, 1], :] - target_kpts3d[..., self.kintree[:, 0], :], dim=-1, keepdim=True)
-        target_conf = torch.minimum(target_kpts3d[..., self.kintree[:, 1], -1], target_kpts3d[..., self.kintree[:, 0], -1])
+        target = torch.norm(target_kpts3d[..., self.target_kintree[:, 1], :] - target_kpts3d[..., self.target_kintree[:, 0], :], dim=-1, keepdim=True)
+        target_conf = torch.minimum(target_kpts3d[..., self.target_kintree[:, 1], -1], target_kpts3d[..., self.target_kintree[:, 0], -1])
         loss = self.loss(est=pred, gt=target, conf=target_conf)
         return loss
 
@@ -224,7 +228,7 @@ class Init(BaseLoss):
             ret[key] = torch.mean((pred[key] - target['init_'+key])**2)
         return ret
 
-from easymocap.multistage.lossbase import AnyReg
+from easymocap.multistage.lossbase import AnyReg,select
 class RegLoss(AnyReg):
     def __init__(self, key, norm) -> None:
         super().__init__(key, norm)
@@ -244,3 +248,39 @@ class Init_pose(Init):
             elif self.norm == 'l1':
                 ret[key] = torch.sum(torch.abs(pred[key] - target['target_'+key]))
         return ret
+class WeightedRegLoss(AnyReg):
+    def __init__(self, key, norm, weight_dict={}, **kwargs):
+        # Pass all arguments safely to AnyReg (handles self.init, self.loss, self.ranges)
+        super().__init__(key, norm, **kwargs)
+        self.weight_dict = weight_dict
+
+    def __call__(self, pred, target):
+        # Bridge the optimizer's (pred, target) format to AnyReg's kwargs format
+        return self.forward(**{self.key: pred[self.key]})
+
+    def forward(self, **kwargs):
+        value = kwargs[self.key]
+        
+        # 1. Safely handle the initialization pose (keeps the body natural)
+        if self.init is not None:
+            value = value - self.init
+            
+        # 2. Apply joint-specific weights
+        weights = torch.ones_like(value)
+        if len(value.shape) >= 2 and value.shape[-1] % 3 == 0:
+            for j_idx, w in self.weight_dict.items():
+                j_idx = int(j_idx) # Ensure index is an integer
+                start_idx = j_idx * 3
+                end_idx = start_idx + 3
+                if end_idx <= value.shape[-1]:
+                    weights[..., start_idx:end_idx] = float(w)
+                    
+        weighted_value = value * weights
+        
+        # 3. Safely handle ranges/indices using lossbase.py's select function
+        weighted_value = select(weighted_value, self.ranges, self.index, self.dim)
+        
+        return self.loss(weighted_value)
+
+    def __str__(self) -> str:
+        return 'Weighted Loss for {}, norm: {}'.format(self.key, self.norm_name)

@@ -1,0 +1,386 @@
+# two stage 
+init_params: # 初始化姿态
+  module: myeasymocap.operations.init.InitParams
+  key_from_data: [keypoints3d]
+  args:
+    num_poses: 165
+    num_shapes: 10
+    num_expression_coeffs: 10  # matches InitParams.__init__ parameter name
+
+fitShape: # 这一步需要根据骨长优化一下SMPL的shape参数
+  module: myeasymocap.operations.optimizer.Optimizer
+  key_from_data: [keypoints3d]
+  key_from_previous: [model, params]
+  args:
+    optimizer_args: {optim_type: lbfgs}
+    optimize_keys: [shapes]
+    loss:
+      k3d:
+        weight: 1000.
+        module: myeasymocap.operations.loss.LimbLength
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          kintree: [
+            [2, 5],                                 # Shoulders width
+            [2, 3], [5, 6], [3, 4], [6, 7],         # Arms (Single set)
+            [5, 12], [2, 9],                        # Torso lengths
+            [9, 12], [9, 10], [10, 11], [12, 13], [13, 14] # Hips & Legs
+          ]
+          target_kintree: [
+            [6, 5],                                 # Shoulders width
+            [6, 8], [5, 7], [8, 10], [7, 9],        # Arms (Single set)
+            [5, 11], [6, 12],                       # Torso lengths
+            [12, 11], [12, 14], [14, 16], [11, 13], [13, 15] # Hips & Legs
+          ]
+      regshape:
+        weight: 0.5   # lowered from 2.0: shape is now frozen after fitShape, so allowing
+                      # larger shape PCs is safe — later stages can't amplify the shape further.
+                      # 2.0 was over-regularising, leaving body close to SMPL-X mean shape.
+        module: myeasymocap.operations.loss.RegLoss
+        key_from_output: [shapes]
+        key_from_infos: [] 
+        args:
+          key: shapes
+          norm: l2
+
+init_RT: # 首先将SMPL参数的shape参数进行整段平均。重新优化更新RT参数
+  module: myeasymocap.operations.optimizer.Optimizer
+  key_from_data: [keypoints3d]
+  key_from_previous: [model, params]
+  args:
+    optimizer_args: {optim_type: lbfgs}
+    optimize_keys: [Th, Rh]
+    loss:
+      k3d:
+        weight: 100.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          index_est: [5, 2, 12, 9]
+          index_gt: [5, 6, 11, 12]
+      smooth:
+        weight: 1.
+        module: myeasymocap.operations.loss.Smooth
+        key_from_output: [Th, keypoints]
+        key_from_infos: [] 
+        args:
+          keys: [keypoints, Th]
+          smooth_type: [Linear, Linear]
+          norm: [l2, l2]
+          order: [2, 2]
+          weights: [10., 100.]
+          window_weight: [0.5, 0.3, 0.1, 0.1]
+
+fit_body_pose: # 仅优化核心身体骨架，忽略手部和脸部的干扰
+  repeat: 2  # was 3 (3rd pass was [shapes], removed when freezing shape after fitShape)
+  module: myeasymocap.operations.optimizer.Optimizer
+  key_from_data: [keypoints3d]
+  key_from_previous: [model, params]
+  args:
+    optimizer_args: {optim_type: lbfgs,lr : 0.5}
+    # Shape is now fully determined by fitShape (limb-length loss) and frozen here.
+    # Was: [[poses,Rh,Th],[poses,Rh,Th],[shapes]] — the trailing [shapes] sub-pass let
+    # full-body keypoint noise distort shape (causing belly protrusion in side view).
+    optimize_keys: [[poses, Rh, Th], [poses, Rh, Th]]
+    loss:
+      k3d:
+        weight: 1000.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          # ONLY BODY & FEET (23 points)
+          index_est: [0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4,  12, 9,  13, 10, 14, 11, 19, 20, 21, 22, 23, 24]
+          index_gt:  [0, 1 , 2 , 3 , 4 , 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+      smooth:
+        weight: 0.1
+        module: myeasymocap.operations.loss.Smooth
+        key_from_output: [poses, Th, keypoints]
+        key_from_infos: []
+        args:
+          keys: [Th, poses, keypoints]
+          smooth_type: [Linear, Linear, Linear]
+          norm: [l2, l2, l2]
+          order: [2, 2, 2]
+          weights: [10., 10., 10.]
+          window_weight: [0.5, 0.3, 0.1, 0.1]
+      prior:
+        weight: 0.01   # Keep posture strictly human in this stage
+        module: easymocap.multistage.gmm.GMMPrior
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          start: 0
+          end: 69
+      regshape:
+        weight: 1.0   # raised from 0.1: was 10000x weaker than k3d, letting shape absorb pose error
+        module: myeasymocap.operations.loss.RegLoss
+        key_from_output: [shapes]
+        key_from_infos: [] # TODO: 根据2D的置信度来计算smooth权重
+        args:
+          key: shapes
+          norm: l2
+      # Lock jaw and eye joints during body fitting — they have no body-keypoint
+       # signal and would otherwise drift on noise from neck/head landmarks.
+       # jaw=22, left_eye=23, right_eye=24 in SMPL-X joint indexing.
+      regPose:
+        weight: 1.0
+        module: myeasymocap.operations.loss.WeightedRegLoss
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          key: poses
+          norm: l2
+          weight_dict:
+            "22": 50.0   # jaw — strongly pinned to neutral, fit_face will release
+            "23": 50.0   # left eye — no gaze signal, keep at zero
+            "24": 50.0   # right eye — no gaze signal, keep at zero
+            "3":  1.2    # lower spine
+            "6":  1.2    # upper spine
+            "9":  1.5    # neck — keep posture
+            "13": 1.8    # left collarbone
+            "14": 1.8    # right collarbone
+
+# ── Stage 4: fit hands ────────────────────────────────────────────────────────
+# Only hand joint rotations (poses[75:165]) are driven by the loss.
+# Expression is NOT in optimize_keys → stays frozen at whatever fit_body_pose left.
+# Rh / Th are included so the global position can still micro-adjust to hand signal.
+# The body is pinned by a 5000-weight anchor so only the wrists/fingers move.
+fit_hands:
+  repeat: 2
+  module: myeasymocap.operations.optimizer.Optimizer
+  key_from_data: [keypoints3d]
+  key_from_previous: [model, params]
+  args:
+    optimizer_args: {optim_type: lbfgs, lr: 0.1}
+    optimize_keys: [[poses, Rh, Th], [poses, Rh, Th]]
+    loss:
+      # 1. Body anchor — holds torso/limbs fixed while hands adjust
+      k3d_body:
+        weight: 5000.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          index_est: [0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4, 12, 9, 13, 10, 14, 11, 19, 20, 21, 22, 23, 24]
+          index_gt:  [0,  1,  2,  3,  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+      # 2. Hand keypoints — drives finger articulation
+      #    SMPLX output indices: left wrist=7, left fingers=26-45, right=46-66
+      #    ViTPose whole-body gt indices: left hand=91-111, right hand=112-132
+      k3d_hands:
+        weight: 1000.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          index_est: [
+            # left hand (wrist + 20 finger joints)
+            7,  26, 27, 28, 29,
+                30, 31, 32, 33,
+                34, 35, 36, 37,
+                38, 39, 40, 41,
+                42, 43, 44, 45,
+            # right hand (wrist + 20 finger joints)
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64, 65, 66
+          ]
+          index_gt: [
+            # left hand — ViTPose whole-body 91-111
+            91,  92,  93,  94,  95,
+                 96,  97,  98,  99,
+                100, 101, 102, 103,
+                104, 105, 106, 107,
+                108, 109, 110, 111,
+            # right hand — ViTPose whole-body 112-132
+            112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+                 123, 124, 125, 126, 127, 128, 129, 130, 131, 132
+          ]
+      smooth:
+        weight: 1.
+        module: myeasymocap.operations.loss.Smooth
+        key_from_output: [poses, Th, keypoints]
+        key_from_infos: []
+        args:
+          keys: [Th, poses, keypoints]
+          smooth_type: [Linear, Linear, Linear]
+          norm: [l2, l2, l2]
+          order: [2, 2, 2]
+          weights: [10., 10., 10.]
+          window_weight: [0.5, 0.3, 0.1, 0.1]
+      prior:
+        weight: 0.01
+        module: easymocap.multistage.gmm.GMMPrior
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          start: 0
+          end: 69
+      regshape:
+        weight: 0.1
+        module: myeasymocap.operations.loss.RegLoss
+        key_from_output: [shapes]
+        key_from_infos: []
+        args:
+          key: shapes
+          norm: l2
+      # Same jaw/eye lock as fit_body_pose — keeps them at neutral until fit_face.
+      regPose:
+        weight: 1.0
+        module: myeasymocap.operations.loss.WeightedRegLoss
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          key: poses
+          norm: l2
+          weight_dict:
+            "22": 50.0   # jaw — strongly pinned, released only in fit_face
+            "23": 50.0   # left eye
+            "24": 50.0   # right eye
+            "3":  1.2    # lower spine
+            "6":  1.2    # upper spine
+            "9":  1.5    # neck
+            "13": 1.8    # left collarbone
+            "14": 1.8    # right collarbone
+# expression coefficients and jaw pose (poses[66:69]) are the targets here.
+# Rh / Th are NOT in optimize_keys → global position is frozen.
+# Hand joints are in poses but pinned near zero by regPose.
+# The body is again pinned by a 5000-weight anchor.
+#
+# Face keypoint indices (for reference when enabling them):
+#   SMPLX output: 67-117  (51 face landmarks from the lmk regressor)
+#   ViTPose whole-body gt: 23-90  (68 face keypoints; subset [40:91] = 51)
+# They are left commented because face 3D triangulation is often noisy.
+# Uncomment and tune when reliable face keypoints are available.
+fit_face:
+  repeat: 2
+  module: myeasymocap.operations.optimizer.Optimizer
+  key_from_data: [keypoints3d]
+  key_from_previous: [model, params]
+  args:
+    optimizer_args: {optim_type: lbfgs, lr: 0.1}
+    # poses covers jaw (indices 66-69); expression covers blend-shape deformation
+    optimize_keys: [[poses, expression], [poses, expression]]
+    loss:
+      # 1. Body anchor — prevents body from drifting during face stage
+      k3d_body:
+        weight: 5000.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          index_est: [0, 16, 15, 18, 17, 5, 2, 6, 3, 7, 4, 12, 9, 13, 10, 14, 11, 19, 20, 21, 22, 23, 24]
+          index_gt:  [0,  1,  2,  3,  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+      # 2. Hand anchor — pins hand pose params (poses[75:165]) to GT keypoints.
+      #    Without this, regPose default-weight pulls hand fingers toward zero
+      #    and undoes the work of the previous fit_hands stage.
+      k3d_hands:
+        weight: 5000.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          index_est: [
+            7,  26, 27, 28, 29,
+                30, 31, 32, 33,
+                34, 35, 36, 37,
+                38, 39, 40, 41,
+                42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+                57, 58, 59, 60, 61, 62, 63, 64, 65, 66
+          ]
+          index_gt: [
+            91,  92,  93,  94,  95,
+                 96,  97,  98,  99,
+                100, 101, 102, 103,
+                104, 105, 106, 107,
+                108, 109, 110, 111,
+            112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
+                 123, 124, 125, 126, 127, 128, 129, 130, 131, 132
+          ]
+      # 3. Face keypoints — uncomment when 3D face landmarks are reliable
+      k3d_face:
+        weight: 500.
+        module: myeasymocap.operations.loss.Keypoints3D
+        key_from_output: [keypoints]
+        key_from_infos: [keypoints3d]
+        args:
+          norm: l2
+          norm_info: 0.02
+          index_est: [
+            67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+            84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
+            101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114,
+            115, 116, 117
+          ]
+          index_gt: [
+            40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+            57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+            74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90
+          ]
+      smooth:
+        weight: 1.
+        module: myeasymocap.operations.loss.Smooth
+        key_from_output: [poses, keypoints]
+        key_from_infos: []
+        args:
+          keys: [poses, keypoints]
+          smooth_type: [Linear, Linear]
+          norm: [l2, l2]
+          order: [2, 2]
+          weights: [10., 10.]
+          window_weight: [0.5, 0.3, 0.1, 0.1]
+      prior:
+        weight: 0.01
+        module: easymocap.multistage.gmm.GMMPrior
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          start: 0
+          end: 69
+      regshape:
+        weight: 0.1
+        module: myeasymocap.operations.loss.RegLoss
+        key_from_output: [shapes]
+        key_from_infos: []
+        args:
+          key: shapes
+          norm: l2
+      # Expression regularisation — pulls expression toward neutral (zero).
+      # This is the primary constraint when face keypoints are disabled.
+      # Lower this if expressions appear flat; raise if face deforms too wildly.
+      regexpression:
+        weight: 0.1
+        module: myeasymocap.operations.loss.RegLoss
+        key_from_output: [expression]
+        key_from_infos: []
+        args:
+          key: expression
+          norm: l2
+      # Prevent jaw and hand joints from drifting while expression adjusts
+      regPose:
+        weight: 0.1
+        module: myeasymocap.operations.loss.WeightedRegLoss
+        key_from_output: [poses]
+        key_from_infos: []
+        args:
+          key: poses
+          norm: l2
+          weight_dict:
+            "3":  1.2   # lower spine
+            "6":  1.2   # upper spine
+            "9":  1.5   # neck
+            "13": 1.8   # left collarbone
+            "14": 1.8   # right collarbone

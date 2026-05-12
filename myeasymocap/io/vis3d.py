@@ -573,11 +573,28 @@ class Render_multiview(VisBase):
         self.render_mode = render_mode
         self.model_name = model_name
         self.shape = shape
+    def render_no_result_frame(self, imgname, cameras):
+        mv_ret = []
+        if not isinstance(imgname, list):
+            imgname = [imgname]
+        for nv in self.view_list:
+            basename = os.path.basename(imgname[nv])
+            assert os.path.exists(imgname[nv]), imgname[nv]
+            vis = cv2.imread(imgname[nv])
+            # undistort the images
+            if cameras['dist'] is not None:
+                vis = Undistort.image(vis, cameras['K'][nv], cameras['dist'][nv], sub=os.path.basename(os.path.dirname(imgname[nv])))
+            vis = cv2.resize(vis, None, fx=self.scale3d, fy=self.scale3d)
+            mv_ret.append(vis)
+            
+        # Write the empty background images to disk to keep frame timing perfectly synced
+        self.merge_and_write(mv_ret)
 
     def render_frame(self, imgname, vert, faces, cameras, pids=[]):
         mv_ret = []
         if not isinstance(imgname, list):
             imgname = [imgname]
+        # print(f"Rendering frame {imgname} for views {self.view_list}...")
         for nv in self.view_list:
             basename = os.path.basename(imgname[nv])
             assert os.path.exists(imgname[nv]), imgname[nv]
@@ -683,7 +700,9 @@ class RenderAll_multiview(Render_multiview):
                         continue  # 避免找不到 index
                     frame_rel = result['frames'].index(index)
                     res_item = {'id': pid}
-                    for key in ['Rh', 'Th', 'poses', 'shapes']:
+                    for key in ['Rh', 'Th', 'poses', 'shapes','expression']:
+                        if key not in result['params']:   # guard for old checkpoints
+                            continue
                         if result['params'][key].shape[0] == 1:
                             res_item[key] = result['params'][key]
                         else:
@@ -692,7 +711,9 @@ class RenderAll_multiview(Render_multiview):
 
             # 如果沒有任何人出現在這個 frame，直接跳過
             if not results_frame:
-                print(f"[vis_render] Warning: no results at frame {index}, skip rendering.")
+                print(f"[vis_render] Warning: no results at frame {index}, rendering empty image.")
+                camera_ = {cam: val[index] for cam, val in cameras.items()}
+                self.render_no_result_frame(imgnames[index], camera_)
                 continue
 
             # 合併參數

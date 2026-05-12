@@ -207,10 +207,11 @@ class MatchBase:
 
     def try_to_triangulate(self, keypoints, cameras, indices, previous=None):
         Pall, keypoints2d = [], []
+        n_joints = keypoints[0].shape[1]
         for nv in range(indices.shape[0]):
             if indices[nv] == -1:
                 Pall.append(cameras['P'][nv])
-                keypoints2d.append(np.zeros((25, 3), dtype=np.float32))
+                keypoints2d.append(np.zeros((n_joints, 3), dtype=np.float32))
                 # keypoints2d.append(keypoints[nv][indices[nv]])
             else:
                 Pall.append(cameras['P'][nv])
@@ -391,7 +392,7 @@ class MatchBase:
                             indices_new = np.zeros_like(indices_origin) - 1
                             indices_new[valid_view] = indices_all[valid_view]
                             keypoints_all[~valid_2d] = 0.
-                            k3d_new = batch_triangulate(keypoints_all, cameras['P'], min_view=3)
+                            k3d_new = batch_triangulate(keypoints_all, cameras['P'], min_view=self.cfg.triangulate.min_view)
                             result = {
                                 'keypoints3d': k3d_new,
                                 'indices': indices_new,

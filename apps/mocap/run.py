@@ -88,7 +88,7 @@ def process(dataset, model, args):
         print(f"{'at_final_total':20s}: {total_final_time:.3f}s")
 
 
-def process_batched(dataset, model, args, batch_size=32):
+def process_batched(dataset, model, args, batch_size=4):
     ret_all = []
     print('[Run] dataset has {} samples'.format(len(dataset)))
 

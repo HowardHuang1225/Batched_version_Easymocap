@@ -162,18 +162,21 @@ def plot_keypoints_auto(img, points, pid, vis_conf=False, use_limb_color=True, s
     from ..dataset.config import CONFIG
     if config_name is None:
         config_name = {25: 'body25', 15: 'body15', 21: 'hand', 42:'handlr', 17: 'coco', 1:'points', 67:'bodyhand', 137: 'total', 79:'up',
-            19:'ochuman'}[len(points)]
+            19:'ochuman',133:'coco133'}[len(points)]
     config = CONFIG[config_name]
+    
+    # --- 1. MAKE BONES (LINES) THINNER ---
     if lw == -1:
-        lw = img.shape[0]//200
+        lw = img.shape[0] // 800  # CHANGED from 400 to 800 (halves the line thickness)
     if config_name == 'hand':
-        lw = img.shape[0]//100
+        lw = img.shape[0] // 400  # CHANGED from 200 to 400
     lw = max(lw, 1)
+    
     for ii, (i, j) in enumerate(config['kintree']):
         if i >= len(points) or j >= len(points):
             continue
-        if i >= 25 and config_name in ['bodyhand', 'total']:
-            lw = max(img.shape[0]//400, 1)
+        if (i >= 25 and config_name in ['bodyhand', 'total'] ) or (i>=23 and config_name=='coco133') :
+            lw = max(img.shape[0]//1200, 1) # CHANGED from 800 to 1200 for tiny details
         pt1, pt2 = points[i], points[j]
         if use_limb_color:
             col = get_rgb(config['colors'][ii])
@@ -187,25 +190,30 @@ def plot_keypoints_auto(img, points, pid, vis_conf=False, use_limb_color=True, s
             image = cv2.line(
                 img, (int(pt1[0]*scale+0.5), int(pt1[1]*scale+0.5)), (int(pt2[0]*scale+0.5), int(pt2[1]*scale+0.5)),
                 col, lw)
-    lw = img.shape[0]//200
+            
+    # --- 2. MAKE JOINTS (CIRCLES) SMALLER ---
+    lw = img.shape[0] // 800      # CHANGED from 400 to 800
     if config_name == 'hand':
-        lw = img.shape[0]//500
+        lw = img.shape[0] // 1500 # CHANGED from 1000 to 1500
     lw = max(lw, 1)
+    
     for i in range(len(points)):
         x, y = points[i][0]*scale, points[i][1]*scale
         if x < 0 or y < 0 or x >10000 or y >10000:
             continue
-        if i >= 25 and config_name in ['bodyhand', 'total']:
-            lw = max(img.shape[0]//400, 1)
+        if (i >= 25 and config_name in ['bodyhand', 'total'] ) or (i>=23 and config_name=='coco133'):
+            lw = max(img.shape[0]//1200, 1) # CHANGED from 800 to 1200
         c = points[i][-1]
         if c > 0.01:
             col = get_rgb(pid)
             if len(points) == 1:
                 _lw = max(0, int(lw * lw_factor))
-                cv2.circle(img, (int(x+0.5), int(y+0.5)), _lw*2, col, lw*2)
-                plot_cross(img, int(x+0.5), int(y+0.5), width=_lw, col=col, lw=lw*2)
+                # CHANGED lw*2 to lw to reduce radius
+                cv2.circle(img, (int(x+0.5), int(y+0.5)), _lw, col, lw) 
+                plot_cross(img, int(x+0.5), int(y+0.5), width=_lw, col=col, lw=lw)
             else:
-                cv2.circle(img, (int(x+0.5), int(y+0.5)), lw*2, col, -1)
+                # CHANGED lw*2 to just lw here. This makes the dots exactly half the size!
+                cv2.circle(img, (int(x+0.5), int(y+0.5)), lw, col, -1) 
             if vis_conf:
                 cv2.putText(img, '{:.1f}'.format(c), (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2)
 

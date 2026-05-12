@@ -35,6 +35,7 @@ args:
       skip: False
       key_from_data: [images, cameras]
       key_from_previous: [keypoints3d] # 用于最后的一起优化
+      key_keep: [cameras, imgnames]
       args:
         scale: 0.5
         mode: center
@@ -152,18 +153,18 @@ args:
     #   args:
     #     backend: pyrender
     #     view_list: [0]
-    render_ground:
-      module: myeasymocap.io.vis3d.Render_multiview
-      key_from_data: [cameras, imgnames]
-      key_from_previous: [params, body_model]
-      args:
-        backend: pyrender
-        view_list: [3]
-        mode: ground
-        scale: 1.
-        shape: [1024, 1024]
+    # render_ground:
+    #   module: myeasymocap.io.vis3d.Render_multiview
+    #   key_from_data: [cameras, imgnames]
+    #   key_from_previous: [params, body_model]
+    #   args:
+    #     backend: pyrender
+    #     view_list: [3]
+    #     mode: ground
+    #     scale: 1.
+    #     shape: [1024, 1024]
     make_video:
       module: myeasymocap.io.video.MakeVideo
       args:
-        fps: 50
+        fps: 30
         keep_image: False

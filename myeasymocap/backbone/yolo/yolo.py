@@ -7,7 +7,7 @@ import pickle
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
 import torchvision
-import tensorrt as trt
+# import tensorrt as trt
 
 def check_modelpath(paths):
     if isinstance(paths, str):

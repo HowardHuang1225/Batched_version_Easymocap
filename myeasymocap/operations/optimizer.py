@@ -149,7 +149,7 @@ class Optimizer:
 
     def __call__(self, params, model, **infos):
         """
-            待优化变量一定要在params中，但params中不一定会被优化
+            待优化变量一定要在params中,但params中不一定会被优化
             infos中的变量不一定会被优化
         """
         # TODO: 应该使用model的device，但考虑到model可能是一个函数，所以暂时当场计算

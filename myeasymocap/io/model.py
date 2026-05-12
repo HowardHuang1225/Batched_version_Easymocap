@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from easymocap.bodymodel.smpl import SMPLModel
-
+from easymocap.bodymodel.smplx import SMPLXModel
 from easymocap.mytools.debug_utils import log
 
 def try_to_download_SMPL(model_dir):
@@ -50,6 +50,58 @@ class SMPLLoader:
             keypoints = self.smplmodel.keypoints(params, return_tensor=True)
         ret = {
             'keypoints': keypoints
+        }
+        ret.update(params)
+        return ret
+    
+class SMPLXLoader:
+    def __init__(self, model_path, regressor_path=None, model_type='smplx', num_pca_comps=45, use_pca=False, **kwargs):
+        """
+        Loader for SMPL-X models with proper device management.
+        """
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        
+        # 1. Load Model
+        if not os.path.exists(model_path):
+            log('[SMPLX] Error: Model not found at {}'.format(model_path))
+            raise FileNotFoundError(model_path)
+            
+        log('[SMPLX] Loading model from `{}`'.format(model_path))
+        if regressor_path:
+            log('[SMPLX] Using Regressor: `{}`'.format(regressor_path))
+        
+        # Import local to avoid circular imports
+        from easymocap.bodymodel.smplx import SMPLXModel
+        
+        self.model = SMPLXModel(
+            model_path=model_path,
+            regressor_path=regressor_path, # Let SMPLModel handle the regressor loading internally
+            num_pca_comps=num_pca_comps,
+            use_pca=use_pca,
+            NUM_SHAPES=10,
+            num_expression_coeffs=10,
+            **kwargs
+        )
+        
+        # CRITICAL FIX: Push model and all internal buffers to GPU immediately upon loading
+        self.model.to(device)
+        self.model_type = 'smplx'
+
+    def __call__(self):
+        # EASYMOCAP EXPECTS THIS EXACT STRUCTURE WITH NO ARGUMENTS
+        return {
+            'body_model': self.model, 
+            'model': self.forward
+        }
+    
+    def forward(self, params, ret_vertices=False):
+        if ret_vertices:
+            data = self.model.vertices(params, return_tensor=True)
+        else:
+            data = self.model.keypoints(params, return_tensor=True)
+            
+        ret = {
+            'keypoints': data
         }
         ret.update(params)
         return ret

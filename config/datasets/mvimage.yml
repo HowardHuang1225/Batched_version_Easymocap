@@ -2,7 +2,7 @@ module: myeasymocap.datasets.mv1p.MVDataset
 args:
   root: TO_BE_FILLED
   subs: []  # used views, default all views
-  subs_vis: ['cam1','cam2','cam3','cam4'] # visualized views
+  subs_vis: ['1','5','9','13'] # visualized views
   ranges: [0, 10000, 1]
   read_image: True
   reader:

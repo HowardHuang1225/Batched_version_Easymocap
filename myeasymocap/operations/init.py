@@ -51,9 +51,10 @@ class InitTranslation:
         return {'params': params}
 
 class InitParams:
-    def __init__(self, num_poses=69, num_shapes=10, rootid=8, share_shape=True, init_trans=0.) -> None:
+    def __init__(self, num_poses=69, num_shapes=10, num_expression_coeffs=10, rootid=8, share_shape=True, init_trans=0.) -> None:
         self.num_poses = num_poses
         self.num_shapes = num_shapes
+        self.num_expression_coeffs = num_expression_coeffs
         self.rootid = rootid
         self.share_shape = share_shape
         self.init_trans = init_trans
@@ -74,7 +75,9 @@ class InitParams:
             'Rh': np.zeros((*shape, 3),dtype=np.float32),
             'Th': np.zeros((*shape, 3),dtype=np.float32),
             'poses': np.zeros((*shape, self.num_poses),dtype=np.float32),
-            'shapes': np.zeros((*shape, self.num_shapes),dtype=np.float32)
+            'shapes': np.zeros((*shape, self.num_shapes),dtype=np.float32),
+            # NEW FEATURE
+            'expression': np.zeros((*shape, self.num_expression_coeffs),dtype=np.float32)
         }
         # TODO: check the root confidence and interpolate
         # 初始化
@@ -85,6 +88,7 @@ class InitParams:
             params['Th'][:, 2] = self.init_trans
         if self.share_shape:
             params['shapes'] = params['shapes'].mean(0, keepdims=True)
+            # expression is per-frame: do NOT share/average it across frames
         return {'params': params}
 
 class Init_params_and_target_poses(InitParams):

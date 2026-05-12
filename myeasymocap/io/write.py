@@ -85,7 +85,7 @@ class WriteSMPL:
                         'id': pid,
                         # 'keypoints3d': result['keypoints3d'][frame_rel]
                     })
-                    for key in ['Rh', 'Th', 'poses', 'shapes']:
+                    for key in ['Rh', 'Th', 'poses', 'shapes','expression']:
                         if result['params'][key].shape[0] == 1:
                             results_frame[-1][key] = result['params'][key]
                         else:

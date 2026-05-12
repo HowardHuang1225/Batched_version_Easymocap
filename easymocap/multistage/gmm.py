@@ -10,7 +10,8 @@ def create_prior_from_cmu(n_gaussians, epsilon=1e-15):
     from os.path import dirname
     np_dtype = np.float32
     with open(join(dirname(__file__), 'gmm_%02d.pkl'%(n_gaussians)), 'rb') as f:
-        gmm = pickle.load(f, encoding='latin1')
+        data = f.read().replace(b'\r\n', b'\n')
+        gmm = pickle.loads(data, encoding='latin1')
     if True:
         means = gmm['means'].astype(np_dtype)
         covs = gmm['covars'].astype(np_dtype)
@@ -117,7 +118,8 @@ class MaxMixtureCompletePrior(object):
         from os.path import dirname
         np_dtype = np.float32
         with open(join(dirname(__file__), 'gmm_%02d.pkl'%(self.n_gaussians)), 'rb') as f:
-            gmm = pickle.load(f, encoding='latin1')
+            data = f.read().replace(b'\r\n', b'\n')
+            gmm = pickle.loads(data, encoding='latin1')
         if True:
             means = gmm['means'].astype(np_dtype)
             covs = gmm['covars'].astype(np_dtype)
